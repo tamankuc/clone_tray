@@ -115,90 +115,62 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
     submenu: []
   }
 
-  // Mount Options submenu
-  let mountSubMenu = {
-    label: 'Mount Options',
-    type: 'submenu',
-    submenu: []
-  }
-
-  // Get all mount option sets
-  const mountOptionSets = rclone.getMountOptionSets(bookmark)
-  
-  // Add each option set to submenu
-  mountOptionSets.forEach(optionSet => {
-    const isMounted = rclone.getMountStatus(bookmark, optionSet.name)
-    const mountPoint = rclone.getMountPath(bookmark, optionSet.name)
+  // Получаем все конфигурации монтирования
+  const mountOptionSets = rclone.getMountOptionSets(bookmark);
     
-    const optionSubMenu = {
-      label: optionSet.name,
-      type: 'submenu',
-      submenu: [
-        {
-          label: 'Mount',
-          type: 'checkbox',
-          checked: !!isMounted,
-          enabled: !isMounted,
-          click: () => bookmarkActionRouter.bind(bookmark, 'mount', optionSet.name)()
-        }
-      ]
+  // Добавляем каждую конфигурацию как отдельный пункт меню
+  mountOptionSets.forEach(mountConfig => {
+    const isMounted = rclone.getMountStatus(bookmark, mountConfig.id);
+        
+    // Добавляем разделитель перед вторым и последующими маунтами
+    if (mountConfig.id !== 'default') {
+      template.submenu.push({ type: 'separator' });
     }
 
-    // Add additional options if mounted
+    // Добавляем пункт монтирования
+    template.submenu.push({
+      label: mountConfig.name,
+      type: 'checkbox',
+      checked: !!isMounted,
+      enabled: !isMounted,
+      click: () => bookmarkActionRouter.bind(bookmark, 'mount', mountConfig.id)()
+    });
+
+    // Если примонтировано, добавляем дополнительные опции
     if (isMounted) {
-      optionSubMenu.submenu.push(
+      template.submenu.push(
         {
-          label: 'Unmount',
-          click: () => bookmarkActionRouter.bind(bookmark, 'unmount', optionSet.name)()
+          label: `Unmount ${mountConfig.name}`,
+          click: () => bookmarkActionRouter.bind(bookmark, 'unmount', mountConfig.id)()
         },
         {
-          label: `Open In ${fileExplorerLabel}`,
-          click: () => bookmarkActionRouter.bind(bookmark, 'open-mounted', optionSet.name)()
-        },
-        { type: 'separator' },
-        {
-          label: `Path: ${mountPoint}`,
-          enabled: false
+          label: `Open ${mountConfig.name} In ${fileExplorerLabel}`,
+          click: () => bookmarkActionRouter.bind(bookmark, 'open-mounted', mountConfig.id)()
         }
-      )
+      );
+
+      // Показываем путь монтирования
+      const mountPath = rclone.getMountPath(bookmark, mountConfig.id);
+      template.submenu.push({
+        label: `Path: ${mountPath}`,
+        enabled: false
+      });
     }
+  });
 
-    // Add configuration options
-    const config = rclone.getMountConfig(bookmark, optionSet.name)
-    optionSubMenu.submenu.push(
-      { type: 'separator' },
-      {
-        label: 'Edit Configuration',
-        click: () => dialogs.editMountOptions(bookmark, optionSet.name)
-      },
-      {
-        label: 'Delete Configuration',
-        enabled: mountOptionSets.length > 1 && !isMounted,
-        click: async () => {
-          await rclone.deleteMountConfig(bookmark, optionSet.name)
-          rclone.refreshTrayMenu()
-        }
-      }
-    )
-
-    mountSubMenu.submenu.push(optionSubMenu)
-  })
-
-  // Add new configuration button
-  mountSubMenu.submenu.push(
+  // Добавляем опцию создания нового маунта
+  template.submenu.push(
     { type: 'separator' },
     {
-      label: 'Add New Configuration',
+      label: 'Add Mount Point',
       click: async () => {
-        const newSetName = `options${mountOptionSets.length + 1}`
-        await rclone.createMountConfig(bookmark, newSetName)
-        rclone.refreshTrayMenu()
+        const existingMounts = mountOptionSets.length - 1; // Вычитаем дефолтный маунт
+        const newMountName = `point${existingMounts + 1}`;
+        await rclone.createMountConfig(bookmark, newMountName);
+        refresh();
       }
     }
-  )
-
-  // Add mount submenu to main menu
-  template.submenu.push(mountSubMenu)
+  );
 
   // Download/Upload
   let isDownload = false
@@ -323,7 +295,13 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
   }
 
   // Set the menu item state if there is any kind of connection or current running process.
-  let isConnected = isMounted || isDownload || isUpload || isServing || isAutomaticUpload
+  let isConnected = false
+  mountOptionSets.forEach(mountConfig => {
+    if (rclone.getMountStatus(bookmark, mountConfig.id)) {
+      isConnected = true
+    }
+  })
+  isConnected = isConnected || isDownload || isUpload || isServing || isAutomaticUpload
 
   // Bookmark controls.
   template.submenu.push(
