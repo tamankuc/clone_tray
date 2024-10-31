@@ -115,27 +115,90 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
     submenu: []
   }
 
-  // Mount
-  let isMounted = rclone.getMountStatus(bookmark)
-  template.submenu.push({
-    label: 'Mount',
-    click: bookmarkActionRouter.bind(bookmark, 'mount'),
-    checked: !!isMounted,
-    enabled: isMounted === false
-  })
-  if (isMounted !== false) {
-    template.submenu.push(
+  // Mount Options submenu
+  let mountSubMenu = {
+    label: 'Mount Options',
+    type: 'submenu',
+    submenu: []
+  }
+
+  // Get all mount option sets
+  const mountOptionSets = rclone.getMountOptionSets(bookmark)
+  
+  // Add each option set to submenu
+  mountOptionSets.forEach(optionSet => {
+    const isMounted = rclone.getMountStatus(bookmark, optionSet.name)
+    const mountPoint = rclone.getMountPath(bookmark, optionSet.name)
+    
+    const optionSubMenu = {
+      label: optionSet.name,
+      type: 'submenu',
+      submenu: [
+        {
+          label: 'Mount',
+          type: 'checkbox',
+          checked: !!isMounted,
+          enabled: !isMounted,
+          click: () => bookmarkActionRouter.bind(bookmark, 'mount', optionSet.name)()
+        }
+      ]
+    }
+
+    // Add additional options if mounted
+    if (isMounted) {
+      optionSubMenu.submenu.push(
+        {
+          label: 'Unmount',
+          click: () => bookmarkActionRouter.bind(bookmark, 'unmount', optionSet.name)()
+        },
+        {
+          label: `Open In ${fileExplorerLabel}`,
+          click: () => bookmarkActionRouter.bind(bookmark, 'open-mounted', optionSet.name)()
+        },
+        { type: 'separator' },
+        {
+          label: `Path: ${mountPoint}`,
+          enabled: false
+        }
+      )
+    }
+
+    // Add configuration options
+    const config = rclone.getMountConfig(bookmark, optionSet.name)
+    optionSubMenu.submenu.push(
+      { type: 'separator' },
       {
-        label: 'Unmount',
-        click: bookmarkActionRouter.bind(bookmark, 'unmount')
+        label: 'Edit Configuration',
+        click: () => dialogs.editMountOptions(bookmark, optionSet.name)
       },
       {
-        label: `Open In ${fileExplorerLabel}`,
-        enabled: !!isMounted,
-        click: bookmarkActionRouter.bind(bookmark, 'open-mounted')
+        label: 'Delete Configuration',
+        enabled: mountOptionSets.length > 1 && !isMounted,
+        click: async () => {
+          await rclone.deleteMountConfig(bookmark, optionSet.name)
+          rclone.refreshTrayMenu()
+        }
       }
     )
-  }
+
+    mountSubMenu.submenu.push(optionSubMenu)
+  })
+
+  // Add new configuration button
+  mountSubMenu.submenu.push(
+    { type: 'separator' },
+    {
+      label: 'Add New Configuration',
+      click: async () => {
+        const newSetName = `options${mountOptionSets.length + 1}`
+        await rclone.createMountConfig(bookmark, newSetName)
+        rclone.refreshTrayMenu()
+      }
+    }
+  )
+
+  // Add mount submenu to main menu
+  template.submenu.push(mountSubMenu)
 
   // Download/Upload
   let isDownload = false

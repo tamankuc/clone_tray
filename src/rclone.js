@@ -196,29 +196,33 @@ const DEFAULT_MOUNT_OPTIONS = {
 * Получить настройки монтирования из конфига
 * @private
 */
-const getMountConfig = function(bookmark) {
+const getMountConfig = function(bookmark, optionSetName = 'options1') {
   const mountConfig = {
       enabled: false,
       path: '',
       options: {}
   };
 
-  if (bookmark.options) {
-      // Получаем значение enabled
-      if ('_rclonetray_mount_enabled' in bookmark.options) {
-          mountConfig.enabled = bookmark.options._rclonetray_mount_enabled === 'true';
+  // Get the specific options set
+  const optionsKey = `${bookmark.$name}.${optionSetName}`;
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  
+  if (config[optionsKey]) {
+      // Get enabled status
+      if ('_rclonetray_mount_enabled' in config[optionsKey]) {
+          mountConfig.enabled = config[optionsKey]._rclonetray_mount_enabled === 'true';
       }
 
-      // Получаем кастомный путь
-      if ('_rclonetray_mount_path' in bookmark.options) {
-          mountConfig.path = bookmark.options._rclonetray_mount_path;
+      // Get custom path
+      if ('_rclonetray_mount_path' in config[optionsKey]) {
+          mountConfig.path = config[optionsKey]._rclonetray_mount_path;
       }
 
-      // Получаем дополнительные опции
-      Object.keys(bookmark.options).forEach(key => {
+      // Get mount options
+      Object.keys(config[optionsKey]).forEach(key => {
           if (key.startsWith('_rclonetray_mount_opt_')) {
               const optionName = '--' + key.replace('_rclonetray_mount_opt_', '');
-              mountConfig.options[optionName] = bookmark.options[key];
+              mountConfig.options[optionName] = config[optionsKey][key];
           }
       });
   }
@@ -226,39 +230,78 @@ const getMountConfig = function(bookmark) {
   return mountConfig;
 };
 
+// Function to get all mount option sets for a bookmark
+const getMountOptionSets = function(bookmark) {
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const optionSets = [];
+  
+  // Find all sections that match the pattern bookmarkName.options*
+  Object.keys(config).forEach(section => {
+      if (section.startsWith(`${bookmark.$name}.options`)) {
+          const setName = section.split('.')[1];
+          optionSets.push({
+              name: setName,
+              config: getMountConfig(bookmark, setName)
+          });
+      }
+  });
+
+  // If no option sets exist, create default one
+  if (optionSets.length === 0) {
+      optionSets.push({
+          name: 'options1',
+          config: {
+              enabled: false,
+              path: '',
+              options: DEFAULT_MOUNT_OPTIONS._rclonetray_mount_options
+          }
+      });
+  }
+
+  return optionSets;
+};
+
+
+
+
+
 /**
 * Сохранить настройки монтирования в конфиг
 * @private
 */
-const saveMountConfig = function(bookmark, config) {
-  if (!bookmark.options) {
-      bookmark.options = {};
+const saveMountConfig = function(bookmark, config, optionSetName = 'options1') {
+  const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const optionsKey = `${bookmark.$name}.${optionSetName}`;
+
+  // Create options section if it doesn't exist
+  if (!rcloneConfig[optionsKey]) {
+      rcloneConfig[optionsKey] = {};
   }
 
-  // Сохраняем enabled
-  bookmark.options._rclonetray_mount_enabled = config.enabled.toString();
+  // Save enabled status
+  rcloneConfig[optionsKey]._rclonetray_mount_enabled = config.enabled.toString();
 
-  // Сохраняем путь
+  // Save path
   if (config.path) {
-      bookmark.options._rclonetray_mount_path = config.path;
+      rcloneConfig[optionsKey]._rclonetray_mount_path = config.path;
   } else {
-      delete bookmark.options._rclonetray_mount_path;
+      delete rcloneConfig[optionsKey]._rclonetray_mount_path;
   }
 
-  // Сохраняем опции
-  Object.keys(bookmark.options).forEach(key => {
+  // Save mount options
+  Object.keys(rcloneConfig[optionsKey]).forEach(key => {
       if (key.startsWith('_rclonetray_mount_opt_')) {
-          delete bookmark.options[key];
+          delete rcloneConfig[optionsKey][key];
       }
   });
 
   Object.entries(config.options).forEach(([key, value]) => {
       const optionKey = '_rclonetray_mount_opt_' + key.replace('--', '');
-      bookmark.options[optionKey] = value;
+      rcloneConfig[optionsKey][optionKey] = value;
   });
 
-  // Сохраняем в конфиг
-  updateBookmark(bookmark.$name, bookmark);
+  // Write back to config file
+  fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
 };
 
 
