@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Add Mount Point</title>
+    <script>
+      window.$main.loadStyles();
+    </script>
+  </head>
+  <body>
+    <form id="mountForm" onsubmit="return saveMount(event)">
+      <div class="row">
+        <div class="cell-left">Mount Point Name:</div>
+        <div class="cell-right">
+          <input type="text" id="name" name="name" required />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell-left">Remote Path:</div>
+        <div class="cell-right">
+          <input
+            type="text"
+            id="remotePath"
+            name="remotePath"
+            placeholder="e.g., documents/work"
+          />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell-left">Local Mount Path:</div>
+        <div class="cell-right">
+          <input
+            type="text"
+            id="localPath"
+            name="localPath"
+            placeholder="Leave empty for default path"
+          />
+          <button type="button" onclick="browsePath()">Browse</button>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button type="button" onclick="window.close()">Cancel</button>
+        <button type="submit">Add</button>
+      </div>
+    </form>
+
+    <script>
+      const props = window.$main.getProps();
+      document.getElementById("name").value = props.suggestedName || "";
+
+      function browsePath() {
+        window.selectDirectory(
+          document.getElementById("localPath").value,
+          function (paths) {
+            if (paths && paths.length > 0) {
+              document.getElementById("localPath").value = paths[0];
+            }
+          }
+        );
+      }
+
+      function saveMount(event) {
+        event.preventDefault();
+        const formData = window.getTheFormData(
+          document.getElementById("mountForm")
+        );
+        window.$main.rclone.saveMountConfig(
+          props.bookmark,
+          {
+            enabled: false,
+            path: formData.localPath,
+            remotePath: formData.remotePath,
+            options:
+              window.$main.rclone.DEFAULT_MOUNT_OPTIONS
+                ._rclonetray_mount_options,
+          },
+          formData.name
+        );
+        window.$main.refreshTray();
+        window.close();
+        return false;
+      }
+    </script>
+  </body>
+</html>
