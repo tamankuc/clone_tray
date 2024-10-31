@@ -23,6 +23,8 @@ const backgroundColor = process.platform === 'darwin'
  */
 const dialogsSingletoneInstances = {}
 
+
+
 /**
  * Simple factory for the dialogs
  * @param {string} dialogName
@@ -188,6 +190,36 @@ const notification = function (message) {
     body: message
   })).show()
 }
+
+
+/**
+ * Показать диалог добавления точки монтирования
+ * @param {Object} bookmark Закладка
+ * @param {string} suggestedName Предлагаемое имя точки монтирования
+ * @returns {Promise} Результат диалога
+ */
+/**
+ * Показать диалог добавления точки монтирования
+ */
+const addMountPoint = function(bookmark, suggestedName) {
+  return new Promise((resolve) => {
+      const dialog = createNewDialog('AddMountPoint', {
+          $singleId: `add_mount_${bookmark.$name}`,
+          width: 500,
+          height: 280,
+          title: 'Add Mount Point',
+          minimizable: false,
+      }, {
+          bookmark: bookmark,
+          suggestedName: suggestedName
+      });
+
+      dialog.on('closed', () => {
+          resolve(true);
+      });
+  });
+};
+
 
 /**
  * Multi Instance error
@@ -369,5 +401,7 @@ module.exports = {
   confirmExit,
   missingRclone,
   notification,
-  rcloneAPIError
+  rcloneAPIError,
+  addMountPoint,
+  
 }

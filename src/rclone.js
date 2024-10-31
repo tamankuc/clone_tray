@@ -196,33 +196,36 @@ const DEFAULT_MOUNT_OPTIONS = {
 * Получить настройки монтирования из конфига
 * @private
 */
-const getMountConfig = function(bookmark, optionSetName = 'options1') {
+const getMountConfig = function(bookmark, mountName = 'default') {
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const sectionKey = mountName === 'default' ? bookmark.$name : `${bookmark.$name}.mount_${mountName}`;
+  
   const mountConfig = {
       enabled: false,
       path: '',
-      options: {}
+      remotePath: '',
+      options: { ...DEFAULT_MOUNT_OPTIONS._rclonetray_mount_options }
   };
 
-  // Get the specific options set
-  const optionsKey = `${bookmark.$name}.${optionSetName}`;
-  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
-  
-  if (config[optionsKey]) {
-      // Get enabled status
-      if ('_rclonetray_mount_enabled' in config[optionsKey]) {
-          mountConfig.enabled = config[optionsKey]._rclonetray_mount_enabled === 'true';
+  if (config[sectionKey]) {
+      // Получаем путь в remote
+      if ('_rclonetray_remote_path' in config[sectionKey]) {
+          mountConfig.remotePath = config[sectionKey]._rclonetray_remote_path;
       }
 
-      // Get custom path
-      if ('_rclonetray_mount_path' in config[optionsKey]) {
-          mountConfig.path = config[optionsKey]._rclonetray_mount_path;
+      if ('_rclonetray_mount_enabled' in config[sectionKey]) {
+          mountConfig.enabled = config[sectionKey]._rclonetray_mount_enabled === 'true';
       }
 
-      // Get mount options
-      Object.keys(config[optionsKey]).forEach(key => {
+      if ('_rclonetray_mount_path' in config[sectionKey]) {
+          mountConfig.path = config[sectionKey]._rclonetray_mount_path;
+      }
+
+      // Получаем опции монтирования
+      Object.keys(config[sectionKey]).forEach(key => {
           if (key.startsWith('_rclonetray_mount_opt_')) {
               const optionName = '--' + key.replace('_rclonetray_mount_opt_', '');
-              mountConfig.options[optionName] = config[optionsKey][key];
+              mountConfig.options[optionName] = config[sectionKey][key];
           }
       });
   }
@@ -278,25 +281,29 @@ const saveMountConfig = function(bookmark, config, mountName = 'default') {
   const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
   const sectionKey = mountName === 'default' ? bookmark.$name : `${bookmark.$name}.mount_${mountName}`;
 
-  // Создаем или обновляем секцию
   if (!rcloneConfig[sectionKey]) {
       rcloneConfig[sectionKey] = {};
   }
 
-  // Сохраняем настройки
+  // Добавляем путь в remote
+  if (config.remotePath) {
+      rcloneConfig[sectionKey]._rclonetray_remote_path = config.remotePath;
+  }
+
+  // Сохраняем остальные настройки
   rcloneConfig[sectionKey]._rclonetray_mount_enabled = config.enabled.toString();
   
   if (config.path) {
       rcloneConfig[sectionKey]._rclonetray_mount_path = config.path;
   }
 
-  // Сохраняем опции монтирования
   Object.entries(config.options || {}).forEach(([key, value]) => {
       rcloneConfig[sectionKey][`_rclonetray_mount_opt_${key.replace('--', '')}`] = value;
   });
 
   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
 };
+
 
 
 
@@ -676,6 +683,14 @@ const onUpdate = function(callback) {
 }
 
 /**
+ * Форматирование ключа для кеша точек монтирования
+ */
+const getMountCacheKey = function(bookmarkName, mountName = 'default') {
+  return `${bookmarkName}@@${mountName}`;
+};
+
+
+/**
  * Получить путь монтирования
  */
 const getMountPath = function(bookmark, mountName = 'default') {
@@ -684,22 +699,23 @@ const getMountPath = function(bookmark, mountName = 'default') {
       return config.path;
   }
   
-  const mountDir = "/tmp/lol3";
+  // Используем системный временный каталог
+  const mountDir = path.join(app.getPath('temp'), 'rclonetray-mounts');
   if (!fs.existsSync(mountDir)) {
       fs.mkdirSync(mountDir, { recursive: true });
   }
+  
   return mountName === 'default' ? 
       path.join(mountDir, bookmark.$name) :
-      path.join(mountDir, `${bookmark.$name}_${mountName}`);
+      path.join(mountDir, `${bookmark.$name}@@${mountName}`);
 };
+
+
 /**
- * Получить статус монтирования
- */
+* Получить статус монтирования
+*/
 const getMountStatus = function(bookmark, mountName = 'default') {
-  const mountPointKey = mountName === 'default' ? 
-      bookmark.$name : 
-      `${bookmark.$name}_${mountName}`;
-      
+  const mountPointKey = getMountCacheKey(bookmark.$name, mountName);
   if (Cache.mountPoints[mountPointKey]) {
       return Cache.mountPoints[mountPointKey].path;
   }
@@ -713,10 +729,11 @@ const getMountStatus = function(bookmark, mountName = 'default') {
 * @returns {Promise<boolean>}
 */
 
-
+/**
+ * Обновление кеша точек монтирования
+ */
 const updateMountPointsCache = async function() {
   try {
-      // Получаем список текущих монтирований
       const response = await Cache.apiService.listMounts();
       
       // Очищаем текущий кеш
@@ -725,10 +742,26 @@ const updateMountPointsCache = async function() {
       // Обновляем кеш монтирований
       if (response && response.mountPoints) {
           Object.entries(response.mountPoints).forEach(([mountPoint, remoteInfo]) => {
-              const remoteName = remoteInfo.fs.split(':')[0];
-              Cache.mountPoints[remoteName] = {
+              const remotePath = remoteInfo.fs;
+              const parts = remotePath.split(':');
+              const remoteName = parts[0];
+              
+              // Проверяем путь монтирования на наличие маркера дополнительной точки
+              const mountPathParts = mountPoint.split(path.sep);
+              const lastPart = mountPathParts[mountPathParts.length - 1];
+              
+              let bookmarkName, mountName;
+              if (lastPart.includes('@@')) {
+                  [bookmarkName, mountName] = lastPart.split('@@');
+              } else {
+                  bookmarkName = remoteName;
+                  mountName = 'default';
+              }
+              
+              const cacheKey = getMountCacheKey(bookmarkName, mountName);
+              Cache.mountPoints[cacheKey] = {
                   path: mountPoint,
-                  remote: remoteInfo.fs
+                  remote: remotePath
               };
           });
       }
@@ -739,30 +772,32 @@ const updateMountPointsCache = async function() {
   } catch (error) {
       console.error('Failed to update mount points cache:', error);
   }
-}
+};
+
+
 /**
 * Отмонтировать удаленную папку
-* @param {object} bookmark Закладка для размонтирования
-* @returns {Promise<boolean>}
 */
-const unmount = async function(bookmark) {
+const unmount = async function(bookmark, mountName = 'default') {
   try {
-      if (!Cache.mountPoints[bookmark.$name]) {
-          console.log('Not mounted:', bookmark.$name);
+      const cacheKey = getMountCacheKey(bookmark.$name, mountName);
+      
+      if (!Cache.mountPoints[cacheKey]) {
+          console.log('Not mounted:', bookmark.$name, mountName);
           return true;
       }
 
-      const mountPoint = Cache.mountPoints[bookmark.$name].path;
+      const mountPoint = Cache.mountPoints[cacheKey].path;
       console.log('Unmounting', mountPoint);
 
       await Cache.apiService.unmount(mountPoint);
       
-      delete Cache.mountPoints[bookmark.$name];
+      delete Cache.mountPoints[cacheKey];
 
       // Сохраняем состояние в конфиг
-      const config = getMountConfig(bookmark);
+      const config = getMountConfig(bookmark, mountName);
       config.enabled = false;
-      saveMountConfig(bookmark, config);
+      saveMountConfig(bookmark, config, mountName);
 
       // Уведомляем об изменениях
       UpdateCallbacksRegistry.forEach(callback => callback());
@@ -774,7 +809,6 @@ const unmount = async function(bookmark) {
       return false;
   }
 };
-
 
 
 /**
@@ -791,62 +825,50 @@ const openMountPoint = async function(bookmark) {
 }
 
 
-// Mount functions - stubs for now
 /**
- * Монтировать удаленную папку
- * @param {object} bookmark Закладка для монтирования
- * @returns {Promise<boolean>}
- */
-/**
- * Монтировать удаленную папку
- * @param {object} bookmark Закладка для монтирования
- * @returns {Promise<boolean>}
- */
-const mount = async function(bookmark) {
+* Монтировать удаленную папку
+*/
+const mount = async function(bookmark, mountName = 'default') {
   try {
-      const mountPoint = getMountPath(bookmark);
+      const config = getMountConfig(bookmark, mountName);
+      const mountPoint = getMountPath(bookmark, mountName);
+      const cacheKey = getMountCacheKey(bookmark.$name, mountName);
       
-      // Проверяем, не смонтировано ли уже
-      if (Cache.mountPoints[bookmark.$name]) {
-          console.log('Already mounted:', bookmark.$name);
+      if (Cache.mountPoints[cacheKey]) {
+          console.log('Already mounted:', bookmark.$name, mountName);
           return true;
       }
 
-      // Создаем директорию для монтирования если её нет
       if (!fs.existsSync(mountPoint)) {
           fs.mkdirSync(mountPoint, { recursive: true });
       }
 
-      // Формируем имя remote и опции
+      // Формируем имя remote с учетом пути
       const remoteName = bookmark.$name + ':';
-      const options = getMountOptions(bookmark);
+      const remotePath = config.remotePath ? 
+          path.posix.join(remoteName, config.remotePath) : 
+          remoteName;
 
-      console.log('Mounting', remoteName, 'to', mountPoint, 'with options:', options);
+      console.log('Mounting', remotePath, 'to', mountPoint, 'with options:', config.options);
 
-      // Собираем параметры для API в правильном формате
       const mountParams = {
-          fs: remoteName,
+          fs: remotePath,
           mountPoint: mountPoint,
-          mountOpt: options
+          mountOpt: config.options
       };
 
       await Cache.apiService.createMount(mountParams);
       
-      // Сохраняем информацию о монтировании
-      Cache.mountPoints[bookmark.$name] = {
+      Cache.mountPoints[cacheKey] = {
           path: mountPoint,
-          remote: remoteName,
-          options: options
+          remote: remotePath,
+          options: config.options
       };
 
-      // Сохраняем состояние в конфиг
-      const config = getMountConfig(bookmark);
       config.enabled = true;
-      saveMountConfig(bookmark, config);
+      saveMountConfig(bookmark, config, mountName);
 
-      console.log(`Successfully mounted ${bookmark.$name} at ${mountPoint}`);
-
-      // Уведомляем об изменениях
+      // Обновляем UI
       UpdateCallbacksRegistry.forEach(callback => callback());
 
       return true;
@@ -856,8 +878,6 @@ const mount = async function(bookmark) {
       return false;
   }
 };
-
-
 
 const createMountConfig = async function(bookmark, configName) {
   const defaultConfig = {
@@ -962,5 +982,13 @@ module.exports = {
   deleteMountConfig,
   getMountOptionSets,
   // For testing/debugging
+  Cache: isDev ? Cache : undefined,
+  DEFAULT_MOUNT_OPTIONS,
+  getMountConfig,
+  getMountPath,
+  createMountConfig,
+  deleteMountConfig,
+  getMountOptionSets,
+  saveMountConfig,
   Cache: isDev ? Cache : undefined
 }

@@ -115,62 +115,75 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
     submenu: []
   }
 
-  // Получаем все конфигурации монтирования
   const mountOptionSets = rclone.getMountOptionSets(bookmark);
     
-  // Добавляем каждую конфигурацию как отдельный пункт меню
   mountOptionSets.forEach(mountConfig => {
-    const isMounted = rclone.getMountStatus(bookmark, mountConfig.id);
-        
-    // Добавляем разделитель перед вторым и последующими маунтами
-    if (mountConfig.id !== 'default') {
-      template.submenu.push({ type: 'separator' });
-    }
+      const isMounted = rclone.getMountStatus(bookmark, mountConfig.id);
+      const config = rclone.getMountConfig(bookmark, mountConfig.id);
+      
+      if (mountConfig.id !== 'default') {
+          template.submenu.push({ type: 'separator' });
+      }
 
-    // Добавляем пункт монтирования
-    template.submenu.push({
-      label: mountConfig.name,
-      type: 'checkbox',
-      checked: !!isMounted,
-      enabled: !isMounted,
-      click: () => bookmarkActionRouter.bind(bookmark, 'mount', mountConfig.id)()
-    });
+      // Формируем метку с путем в remote, если он указан
+      const mountLabel = config.remotePath ? 
+          `${mountConfig.name} (${config.remotePath})` : 
+          mountConfig.name;
 
-    // Если примонтировано, добавляем дополнительные опции
-    if (isMounted) {
-      template.submenu.push(
-        {
-          label: `Unmount ${mountConfig.name}`,
-          click: () => bookmarkActionRouter.bind(bookmark, 'unmount', mountConfig.id)()
-        },
-        {
-          label: `Open ${mountConfig.name} In ${fileExplorerLabel}`,
-          click: () => bookmarkActionRouter.bind(bookmark, 'open-mounted', mountConfig.id)()
-        }
-      );
-
-      // Показываем путь монтирования
-      const mountPath = rclone.getMountPath(bookmark, mountConfig.id);
       template.submenu.push({
-        label: `Path: ${mountPath}`,
-        enabled: false
+          label: mountLabel,
+          type: 'checkbox',
+          checked: !!isMounted,
+          enabled: !isMounted,
+          click: () => {
+              rclone.mount(bookmark, mountConfig.id)
+                  .then(() => refresh())
+                  .catch(error => console.error('Mount error:', error));
+          }
       });
-    }
+
+      if (isMounted) {
+          template.submenu.push(
+              {
+                  label: `Unmount ${mountConfig.name}`,
+                  click: () => {
+                      rclone.unmount(bookmark, mountConfig.id)
+                          .then(() => refresh())
+                          .catch(error => console.error('Unmount error:', error));
+                  }
+              },
+              {
+                  label: `Open ${mountConfig.name} In ${fileExplorerLabel}`,
+                  click: () => rclone.openMountPoint(bookmark, mountConfig.id)
+              },
+              {
+                  label: `Mount Point: ${rclone.getMountPath(bookmark, mountConfig.id)}`,
+                  enabled: false
+              }
+          );
+      }
   });
 
-  // Добавляем опцию создания нового маунта
+  // Добавляем создание нового маунта через диалог
   template.submenu.push(
     { type: 'separator' },
     {
-      label: 'Add Mount Point',
-      click: async () => {
-        const existingMounts = mountOptionSets.length - 1; // Вычитаем дефолтный маунт
-        const newMountName = `point${existingMounts + 1}`;
-        await rclone.createMountConfig(bookmark, newMountName);
-        refresh();
-      }
+        label: 'Add Mount Point...',
+        click: async () => {
+            try {
+                const existingMounts = mountOptionSets.length - 1;
+                const result = await dialogs.addMountPoint(bookmark, `point${existingMounts + 1}`);
+                if (result) {
+                    refresh();
+                }
+            } catch (error) {
+                console.error('Error adding mount point:', error);
+                dialogs.rcloneAPIError('Failed to add mount point: ' + error.message);
+            }
+        }
     }
-  );
+);
+
 
   // Download/Upload
   let isDownload = false
