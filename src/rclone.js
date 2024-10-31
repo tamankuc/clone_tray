@@ -10,7 +10,8 @@ const isDev = require('electron-is-dev')
 const settings = require('./settings')
 const dialogs = require('./dialogs')
 const fetch = require('node-fetch')
-
+const RcloneApiService = require('./RcloneApiService');
+let apiService = null;
 // Constants
 const UnsupportedRcloneProviders = [
   'union',
@@ -115,61 +116,19 @@ const getRcloneBinary = function() {
  * @private
  */
 const makeRcloneRequest = async function(method, endpoint, params = null) {
-  // Maximum number of retries
-  const maxRetries = 3
-  let lastError = null
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      // If API is not initialized, fall back to CLI
-      if (!Cache.apiProcess || !Cache.apiEndpoint) {
-        console.log('API not initialized, falling back to CLI')
-        return await executeCliCommand(endpoint, params)
+  try {
+      if (!Cache.apiService) {
+          console.log('API не инициализирован, возврат к CLI');
+          return await executeCliCommand(endpoint, params);
       }
 
-      const url = `${Cache.apiEndpoint}/${endpoint}`
-      console.log(`Making API request (attempt ${attempt + 1}/${maxRetries}): ${method} ${url}`, params || '')
-
-      const options = {
-        method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Basic ' + Buffer.from('user:pass').toString('base64')
-        },
-        timeout: 5000
-      }
-
-      if (params) {
-        options.body = JSON.stringify(params)
-      }
-
-      const response = await fetch(url, options)
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error ${response.status}`)
-      }
-
-      const data = await response.json()
-
-      if (data.error) {
-        throw new Error(data.error)
-      }
-
-      return data
-    } catch (error) {
-      console.error(`API request attempt ${attempt + 1} failed:`, error)
-      lastError = error
-      // Wait before retry
-      if (attempt < maxRetries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000))
-      }
-    }
+      return await Cache.apiService.makeRequest(endpoint, method, params);
+  } catch (error) {
+      console.error('Ошибка API запроса:', error);
+      console.error('Возврат к CLI режиму');
+      return await executeCliCommand(endpoint, params);
   }
-
-  // If all attempts failed, fall back to CLI
-  console.log('All API attempts failed, falling back to CLI')
-  return await executeCliCommand(endpoint, params)
-}
+};
 
 const executeCliCommand = async function(endpoint, params) {
   console.log('Falling back to CLI command for endpoint:', endpoint)
@@ -245,164 +204,130 @@ const executeRcloneCommand = async function(command, options = {}) {
 
 const startRcloneAPI = async function() {
   return new Promise((resolve, reject) => {
-    try {
-      if (!settings.get('rclone_api_enable')) {
-        console.log('Rclone API disabled in settings, using CLI mode')
-        resolve(false)
-        return
-      }
-
-      const port = settings.get('rclone_api_port')
-      const rcloneBinary = getRcloneBinary()
-
-      // Ensure rclone exists
       try {
-        execSync(`${rcloneBinary} version`)
+          if (!settings.get('rclone_api_enable')) {
+              console.log('Rclone API отключен в настройках, используется режим CLI');
+              resolve(false);
+              return;
+          }
+
+          const port = settings.get('rclone_api_port');
+          const rcloneBinary = getRcloneBinary();
+
+          // Проверяем наличие rclone
+          try {
+              execSync(`${rcloneBinary} version`);
+          } catch (error) {
+              console.error('Не найден бинарный файл rclone:', error);
+              resolve(false);
+              return;
+          }
+
+          // Инициализируем сервис API
+          const apiService = new RcloneApiService(port, 'user', 'pass');
+
+          // Формируем команду запуска с обновленными параметрами
+          const command = [
+              'rcd',
+              `--rc-addr=127.0.0.1:${port}`,
+              `--config=${settings.get('rclone_config')}`,
+              '--rc-enable-metrics',
+              '--rc-files',
+              '--cache-dir=' + path.join(app.getPath('userData'), 'cache'),
+              '--rc-user=user',
+              '--rc-pass=pass',
+              '--rc-allow-origin=*'
+          ];
+
+          if (isDev) {
+              command.push('--verbose');
+          }
+
+          console.log('Запуск Rclone API с командой:', rcloneBinary, command.join(' '));
+
+          const apiProcess = spawn(rcloneBinary, command, {
+              stdio: ['ignore', 'pipe', 'pipe'],
+              detached: false
+          });
+
+          let isStarted = false;
+          let checkInterval = null;
+          let startupTimeout = null;
+
+          // Функция проверки API
+          const checkApi = async () => {
+              try {
+                  return await apiService.checkConnection();
+              } catch (error) {
+                  console.log('API check failed:', error.message);
+                  return false;
+              }
+          };
+
+          const waitForApi = async () => {
+              try {
+                  if (await checkApi()) {
+                      isStarted = true;
+                      Cache.apiProcess = apiProcess;
+                      Cache.apiEndpoint = `http://127.0.0.1:${port}`;
+                      Cache.apiService = apiService;
+                      console.log('API отвечает по адресу:', Cache.apiEndpoint);
+                      if (checkInterval) clearInterval(checkInterval);
+                      if (startupTimeout) clearTimeout(startupTimeout);
+                      resolve(true);
+                  }
+              } catch (error) {
+                  console.error('Ошибка при проверке API:', error);
+              }
+          };
+
+          // Обработчики событий процесса
+          apiProcess.stdout.on('data', (data) => {
+              const message = data.toString().trim();
+              console.log('Rclone API:', message);
+          });
+
+          apiProcess.stderr.on('data', (data) => {
+              const message = data.toString().trim();
+              console.error('Ошибка Rclone API:', message);
+          });
+
+          apiProcess.on('close', (code) => {
+              console.log(`Процесс Rclone API завершился с кодом ${code}`);
+              if (!isStarted) {
+                  if (checkInterval) clearInterval(checkInterval);
+                  if (startupTimeout) clearTimeout(startupTimeout);
+                  resolve(false);
+              }
+          });
+
+          // Даем процессу время на запуск перед первой проверкой
+          setTimeout(() => {
+              checkInterval = setInterval(waitForApi, 1000);
+              
+              startupTimeout = setTimeout(() => {
+                  if (!isStarted) {
+                      console.error('Превышено время запуска Rclone API');
+                      if (checkInterval) clearInterval(checkInterval);
+                      if (apiProcess.pid) {
+                          try {
+                              process.kill(apiProcess.pid);
+                          } catch (err) {
+                              console.error('Ошибка при завершении процесса:', err);
+                          }
+                      }
+                      resolve(false);
+                  }
+              }, 15000);
+          }, 2000);
+
       } catch (error) {
-        console.error('Rclone binary not found:', error)
-        resolve(false)
-        return
+          console.error('Не удалось запустить Rclone API:', error);
+          resolve(false);
       }
+  });
+};
 
-      console.log('Using rclone binary:', rcloneBinary)
-
-      // Set default config path
-      const defaultConfigPath = path.join(app.getPath('userData'), 'rclone.conf')
-      if (!settings.get('rclone_config')) {
-        settings.set('rclone_config', defaultConfigPath)
-      }
-
-      // Ensure config directory exists
-      const configDir = path.dirname(settings.get('rclone_config'))
-      if (!fs.existsSync(configDir)) {
-        fs.mkdirSync(configDir, { recursive: true })
-      }
-
-      // Touch config file if it doesn't exist
-      if (!fs.existsSync(settings.get('rclone_config'))) {
-        fs.writeFileSync(settings.get('rclone_config'), '')
-      }
-
-      // Build command with all necessary options
-      const command = [
-        'rcd',
-        '--rc-no-auth',
-        `--rc-addr=127.0.0.1:${port}`,
-        `--config=${settings.get('rclone_config')}`,
-        '--rc-allow-origin=*',
-        '--rc-enable-metrics',
-        '--rc-web-fetch-url=http://127.0.0.1:${port}',
-        '--rc-files',
-        '--rc-job-expire-duration=24h',
-        '--rc-serve',
-        '--rc-no-auth',
-        '--cache-dir=' + path.join(app.getPath('userData'), 'cache'),
-        '--rc-user=user',  // добавляем базовую аутентификацию
-        '--rc-pass=pass'
-      ]
-
-      if (isDev) {
-        command.push('--verbose')
-      }
-
-      console.log('Starting Rclone API with command:', rcloneBinary, command.join(' '))
-
-      // Start process detached to prevent it from being killed when parent exits
-      const apiProcess = spawn(rcloneBinary, command, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: false  // process will be part of parent's process group
-      })
-
-      let isStarted = false
-
-      // Функция проверки API
-      const checkApi = async () => {
-        try {
-          const response = await fetch(`http://127.0.0.1:${port}/config/listremotes`)
-          if (response.ok) {
-            return true
-          }
-        } catch (error) {
-          return false
-        }
-        return false
-      }
-
-      const waitForApi = async () => {
-        if (await checkApi()) {
-          isStarted = true
-          Cache.apiProcess = apiProcess
-          Cache.apiEndpoint = `http://127.0.0.1:${port}`
-          console.log('API is responding at:', Cache.apiEndpoint)
-          clearInterval(checkInterval)
-          clearTimeout(startupTimeout)
-          resolve(true)
-        }
-      }
-
-      // Check API availability every 500ms
-      const checkInterval = setInterval(waitForApi, 500)
-
-      apiProcess.stdout.on('data', (data) => {
-        const message = data.toString()
-        console.log('Rclone API:', message.trim())
-      })
-
-      apiProcess.stderr.on('data', (data) => {
-        const message = data.toString()
-        if (!message.includes('Warning: Allow origin set to *')) {
-          console.error('Rclone API Error:', message.trim())
-        }
-      })
-
-      const startupTimeout = setTimeout(() => {
-        if (!isStarted) {
-          console.error('Rclone API server startup timeout')
-          clearInterval(checkInterval)
-          if (apiProcess.pid) {
-            process.kill(-apiProcess.pid) // Kill process group
-          }
-          resolve(false)
-        }
-      }, 10000) // Увеличили таймаут до 10 секунд
-
-      // Handle process exit
-      apiProcess.on('close', (code) => {
-        console.log(`Rclone API process exited with code ${code}`)
-        if (!isStarted) {
-          clearInterval(checkInterval)
-          clearTimeout(startupTimeout)
-          resolve(false)
-        }
-      })
-
-      // Clean up on parent process exit
-      process.on('exit', () => {
-        if (apiProcess.pid) {
-          process.kill(-apiProcess.pid)
-        }
-      })
-
-      process.on('SIGINT', () => {
-        if (apiProcess.pid) {
-          process.kill(-apiProcess.pid)
-        }
-        process.exit()
-      })
-
-      process.on('SIGTERM', () => {
-        if (apiProcess.pid) {
-          process.kill(-apiProcess.pid)
-        }
-        process.exit()
-      })
-
-    } catch (error) {
-      console.error('Failed to start Rclone API:', error)
-      resolve(false)
-    }
-  })
-}
 
 /**
  * Update providers cache using correct API URL
