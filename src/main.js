@@ -9,6 +9,7 @@ const tray = require('./tray')
 
 // Error handler
 process.on('uncaughtException', function (error) {
+  console.error('Uncaught Exception:', error)
   if (dialogs.uncaughtException(error)) {
     app.exit()
   }
@@ -43,35 +44,43 @@ if (!app.requestSingleInstanceLock()) {
 if (isDev) {
   // Export interact from console
   require('inspector').open()
-  // load electron-reload
+  
+  // Load electron-reload
   try {
     require('electron-reload')(__dirname, {
       electron: path.join(__dirname, '..', 'node_modules', '.bin', 'electron')
     })
-  } catch (err) { }
+  } catch (err) {
+    console.error('Failed to load electron-reload:', err)
+  }
 
-  // @TODO Remove before release
   global.$main = {
     app: app,
     __dirname: __dirname,
-    require: require
+    require: require,
+    rclone: rclone // Добавим для отладки
   }
 }
 
 // Focus the app if second instance is going to starts.
 app.on('second-instance', app.focus)
 
-// This method will be called when Electron has finished
-// initialization and is ready to create browser windows.
-// Some APIs can only be used after this event occurs.
+// This method will be called when Electron has finished initialization
 app.on('ready', async function () {
   try {
-    // Initialize the tray.
-    tray.init()
+    console.log('Initializing application...')
+    
+    // Initialize the tray first
+    await tray.init()
+    console.log('Tray initialized')
 
-    // Initialize Rclone API server and connect
+    // Initialize Rclone and connect callbacks
     await rclone.init()
+    console.log('Rclone initialized')
+    
     rclone.onUpdate(tray.refresh)
+    await tray.refresh()
+    console.log('Initial tray refresh completed')
 
     // Only on macOS there is app.dock.
     if (process.platform === 'darwin') {
@@ -81,7 +90,7 @@ app.on('ready', async function () {
   } catch (error) {
     console.error('Failed to initialize application:', error)
     dialogs.rcloneAPIError('Failed to initialize application')
-    app.exit()
+    app.exit(1)
   }
 })
 
