@@ -9,6 +9,7 @@ const { app } = require('electron')
 const isDev = require('electron-is-dev')
 const settings = require('./settings')
 const dialogs = require('./dialogs')
+const fetch = require('node-fetch')
 
 /**
  * Define unsupported provider types
@@ -64,7 +65,9 @@ const Cache = {
   downloads: {},
   uploads: {},
   automaticUploads: {},
-  servePoints: {}
+  servePoints: {},
+  apiProcess: null,
+  apiEndpoint: null
 }
 
 /**
@@ -81,29 +84,202 @@ const getRcloneBinary = function() {
 }
 
 /**
- * Update providers cache by reading config
- * @private 
+ * Make request to Rclone API
+ * @param {string} method 
+ * @param {string} endpoint
+ * @param {object} body
+ * @returns {Promise}
+ * @private
+ */
+const makeRcloneRequest = async function(method, endpoint, body = null) {
+  try {
+    if (!Cache.apiEndpoint) {
+      throw new Error('Rclone API not initialized')
+    }
+
+    const url = `${Cache.apiEndpoint}${endpoint}`
+    const options = {
+      method,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    }
+
+    if (body) {
+      options.body = JSON.stringify(body)
+    }
+
+    // Add authentication if enabled
+    if (settings.get('rclone_api_auth_enable')) {
+      const auth = Buffer.from(`${settings.get('rclone_api_username')}:${settings.get('rclone_api_password')}`).toString('base64')
+      options.headers['Authorization'] = `Basic ${auth}`
+    }
+
+    if (isDev) {
+      console.log(`Making API request: ${method} ${url}`)
+    }
+
+    const response = await fetch(url, options)
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error ${response.status}: ${response.statusText}`)
+    }
+
+    const data = await response.json()
+
+    if (isDev) {
+      console.log('API response:', data)
+    }
+
+    return data
+  } catch (error) {
+    console.error('API request failed:', error)
+    throw error
+  }
+}
+
+/**
+ * Start Rclone API server
+ * @private
+ */
+const startRcloneAPI = async function() {
+  return new Promise((resolve, reject) => {
+    try {
+      if (!settings.get('rclone_api_enable')) {
+        console.log('Rclone API disabled in settings')
+        resolve()
+        return
+      }
+
+      const port = settings.get('rclone_api_port')
+      const rcloneBinary = getRcloneBinary()
+
+      // Build command array
+      const command = [
+        'rcd',
+        '--rc-no-auth',
+        `--rc-addr=127.0.0.1:${port}`
+      ]
+
+      // Add authentication if enabled
+      if (settings.get('rclone_api_auth_enable')) {
+        command.push(
+          `--rc-user=${settings.get('rclone_api_username')}`,
+          `--rc-pass=${settings.get('rclone_api_password')}`
+        )
+      }
+
+      // Add config file if specified
+      if (settings.get('rclone_config')) {
+        command.push(`--config=${settings.get('rclone_config')}`)
+      }
+
+      // Add CORS settings
+      command.push(`--rc-allow-origin=${settings.get('rclone_rc_allow_origin')}`)
+
+      if (isDev) {
+        console.log('Starting Rclone API with command:', rcloneBinary, command.join(' '))
+      }
+
+      // Start Rclone API server
+      const apiProcess = spawn(rcloneBinary, command, {
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+
+      // Store process reference
+      Cache.apiProcess = apiProcess
+      Cache.apiEndpoint = `http://127.0.0.1:${port}`
+
+      // Handle stdout
+      apiProcess.stdout.on('data', (data) => {
+        const message = data.toString()
+        if (isDev) {
+          console.log('Rclone API:', message)
+        }
+        // Resolve when API server is ready
+        if (message.includes('Serving remote control on')) {
+          resolve()
+        }
+      })
+
+      // Handle stderr
+      apiProcess.stderr.on('data', (data) => {
+        const message = data.toString()
+        console.error('Rclone API Error:', message)
+      })
+
+      // Handle process exit
+      apiProcess.on('close', (code) => {
+        console.log(`Rclone API process exited with code ${code}`)
+        Cache.apiProcess = null
+        Cache.apiEndpoint = null
+        
+        if (code !== 0) {
+          dialogs.rcloneAPIError('Rclone API process has exited unexpectedly')
+          // Try to restart API server
+          startRcloneAPI().catch(console.error)
+        }
+      })
+
+    } catch (error) {
+      console.error('Failed to start Rclone API:', error)
+      reject(error)
+    }
+  })
+}
+
+/**
+ * Stop Rclone API server
+ * @private
+ */
+const stopRcloneAPI = async function() {
+  if (Cache.apiProcess) {
+    Cache.apiProcess.kill()
+    Cache.apiProcess = null
+    Cache.apiEndpoint = null
+  }
+}
+
+/**
+ * Execute Rclone command via API
+ * @param {string} command 
+ * @param {object} options
+ * @returns {Promise}
+ * @private
+ */
+const executeRcloneCommand = async function(command, options = {}) {
+  try {
+    const response = await makeRcloneRequest('POST', '/core/command', {
+      command: command,
+      ...options
+    })
+
+    if (response.error) {
+      throw new Error(response.error)
+    }
+
+    return response
+  } catch (error) {
+    console.error('Failed to execute rclone command:', error)
+    throw error
+  }
+}
+
+/**
+ * Update providers cache using API
+ * @private
  */
 const updateProvidersCache = async function() {
   try {
-    const rcloneBinary = getRcloneBinary()
-    
-    // Get list of available providers from rclone config providers command
-    const providersOutput = execSync(`${rcloneBinary} config providers`).toString()
-    const providerLines = providersOutput.split('\n')
-    
+    const response = await makeRcloneRequest('POST', '/config/providers')
     Cache.providers = {}
     
-    providerLines.forEach(line => {
-      const match = line.match(/^\s*(\w+):\s*(.+)$/)
-      if (match) {
-        const [, type, description] = match
-        if (!UnsupportedRcloneProviders.includes(type)) {
-          Cache.providers[type] = {
-            type,
-            description,
-            requiresBucket: BucketRequiredProviders.includes(type)
-          }
+    Object.keys(response.providers).forEach(type => {
+      if (!UnsupportedRcloneProviders.includes(type)) {
+        Cache.providers[type] = {
+          type,
+          description: response.providers[type],
+          requiresBucket: BucketRequiredProviders.includes(type)
         }
       }
     })
@@ -118,34 +294,28 @@ const updateProvidersCache = async function() {
 }
 
 /**
- * Update bookmarks cache by reading config file
+ * Update bookmarks cache using API 
  * @private
  */
 const updateBookmarksCache = async function() {
   try {
-    if (!fs.existsSync(Cache.configFile)) {
-      Cache.bookmarks = {}
-      return
-    }
-
-    const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'))
+    const response = await makeRcloneRequest('POST', '/config/dump')
     Cache.bookmarks = {}
 
-    // Convert ini sections to bookmarks
-    Object.keys(config).forEach(name => {
+    Object.keys(response).forEach(name => {
       if (name !== 'RCLONE_ENCRYPT_V0') {
-        const bookmark = config[name]
-        bookmark.$name = name // Add name reference
+        const bookmark = response[name]
+        bookmark.$name = name
         Cache.bookmarks[name] = bookmark
       }
     })
 
     if (isDev) {
-      console.log('Updated bookmarks cache:', Cache.bookmarks) 
+      console.log('Updated bookmarks cache:', Cache.bookmarks)
     }
   } catch (error) {
     console.error('Failed to update bookmarks cache:', error)
-    throw new Error('Failed to read rclone config')
+    throw new Error('Failed to get rclone config')
   }
 }
 
@@ -159,19 +329,23 @@ const init = async function() {
       process.env.PATH += ':' + path.join('/', 'usr', 'local', 'bin')
     }
 
-    const rcloneBinary = getRcloneBinary()
+    // Start API server
+    await startRcloneAPI()
+    console.log('Rclone API server started successfully')
 
-    // Get rclone version
-    Cache.version = execSync(`${rcloneBinary} version`).toString().split('\n')[0]
+    // Get version via API
+    const versionResponse = await makeRcloneRequest('POST', '/core/version')
+    Cache.version = versionResponse.version
     
     // Get config file path
     if (settings.get('rclone_config')) {
       Cache.configFile = settings.get('rclone_config')
     } else {
-      Cache.configFile = path.join(os.homedir(), '.config', 'rclone', 'rclone.conf')
+      const configResponse = await makeRcloneRequest('POST', '/config/path')
+      Cache.configFile = configResponse.path
     }
 
-    // Initialize caches
+    // Initialize caches via API
     await updateProvidersCache()
     await updateBookmarksCache()
 
@@ -184,6 +358,13 @@ const init = async function() {
     console.error('Failed to initialize rclone:', error)
     throw error
   }
+}
+
+/**
+ * Clean up before quit
+ */
+const prepareQuit = async function() {
+  await stopRcloneAPI()
 }
 
 // Rest of the functions remain the same...
@@ -285,7 +466,6 @@ const serveStart = () => false
 const serveStop = () => false
 const serveStatus = () => false
 const openNCDU = () => false
-const prepareQuit = () => Promise.resolve()
 
 module.exports = {
   getProviders,
