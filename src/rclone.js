@@ -107,7 +107,7 @@ const getRcloneBinary = function() {
 }
 
 /**
- * Make request to Rclone API with correct URLs
+ * Make request to Rclone API with retry
  * @param {string} method 
  * @param {string} endpoint
  * @param {object} params
@@ -115,51 +115,61 @@ const getRcloneBinary = function() {
  * @private
  */
 const makeRcloneRequest = async function(method, endpoint, params = null) {
-  try {
-    // Проверяем что API сервер запущен
-    if (!Cache.apiProcess || !Cache.apiEndpoint) {
-      console.log('API not initialized, falling back to CLI')
-      return await executeCliCommand(endpoint, params)
+  // Maximum number of retries
+  const maxRetries = 3
+  let lastError = null
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      // If API is not initialized, fall back to CLI
+      if (!Cache.apiProcess || !Cache.apiEndpoint) {
+        console.log('API not initialized, falling back to CLI')
+        return await executeCliCommand(endpoint, params)
+      }
+
+      const url = `${Cache.apiEndpoint}/${endpoint}`
+      console.log(`Making API request (attempt ${attempt + 1}/${maxRetries}): ${method} ${url}`, params || '')
+
+      const options = {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Basic ' + Buffer.from('user:pass').toString('base64')
+        },
+        timeout: 5000
+      }
+
+      if (params) {
+        options.body = JSON.stringify(params)
+      }
+
+      const response = await fetch(url, options)
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      if (data.error) {
+        throw new Error(data.error)
+      }
+
+      return data
+    } catch (error) {
+      console.error(`API request attempt ${attempt + 1} failed:`, error)
+      lastError = error
+      // Wait before retry
+      if (attempt < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000))
+      }
     }
-
-    const url = `${Cache.apiEndpoint}/${endpoint}`
-    console.log(`Making API request: ${method} ${url}`, params || '')
-
-    const options = {
-      method,
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      timeout: 5000
-    }
-
-    if (params) {
-      options.body = JSON.stringify(params)
-    }
-
-    const response = await fetch(url, options)
-    console.log(`API Response status: ${response.status}`)
-    
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error('API Error response:', errorText)
-      throw new Error(`HTTP error ${response.status}: ${errorText}`)
-    }
-
-    const data = await response.json()
-    console.log('API Response data:', data)
-
-    if (data.error) {
-      throw new Error(`API Error: ${data.error}`)
-    }
-
-    return data
-  } catch (error) {
-    console.error(`API request failed for ${endpoint}:`, error)
-    return await executeCliCommand(endpoint, params)
   }
-}
 
+  // If all attempts failed, fall back to CLI
+  console.log('All API attempts failed, falling back to CLI')
+  return await executeCliCommand(endpoint, params)
+}
 
 const executeCliCommand = async function(endpoint, params) {
   console.log('Falling back to CLI command for endpoint:', endpoint)
