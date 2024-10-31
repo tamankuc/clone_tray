@@ -64,23 +64,31 @@ app.on('second-instance', app.focus)
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.on('ready', function () {
-  // Initialize the tray.
-  tray.init()
+app.on('ready', async function () {
+  try {
+    // Initialize the tray.
+    tray.init()
 
-  // Initialize Rclone.
-  rclone.init()
-  rclone.onUpdate(tray.refresh)
+    // Initialize Rclone API server and connect
+    await rclone.init()
+    rclone.onUpdate(tray.refresh)
 
-  // Only on macOS there is app.dock.
-  if (process.platform === 'darwin') {
-    // Hide the app from dock and taskbar.
-    app.dock.hide()
+    // Only on macOS there is app.dock.
+    if (process.platform === 'darwin') {
+      // Hide the app from dock and taskbar.
+      app.dock.hide()
+    }
+  } catch (error) {
+    console.error('Failed to initialize application:', error)
+    dialogs.rcloneAPIError('Failed to initialize application')
+    app.exit()
   }
 })
 
 // Prepare app to quit.
-app.on('before-quit', rclone.prepareQuit)
+app.on('before-quit', async () => {
+  await rclone.prepareQuit()
+})
 
 // Should not quit when all windows are closed,
 // because the application is staying as system tray indicator.

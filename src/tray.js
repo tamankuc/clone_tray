@@ -41,39 +41,44 @@ const fileExplorerLabel = process.platform === 'darwin'
  * @param {string} action
  * @param ...args
  */
-const bookmarkActionRouter = function (action, ...args) {
-  if (action === 'mount') {
-    rclone.mount(this)
-  } else if (action === 'unmount') {
-    rclone.unmount(this)
-  } else if (action === 'open-mounted') {
-    rclone.openMountPoint(this)
-  } else if (action === 'download') {
-    rclone.download(this)
-  } else if (action === 'stop-downloading') {
-    rclone.stopDownload(this)
-  } else if (action === 'upload') {
-    rclone.upload(this)
-  } else if (action === 'stop-uploading') {
-    rclone.stopUpload(this)
-  } else if (action === 'toggle-automatic-upload') {
-    rclone.toggleAutomaticUpload(this)
-  } else if (action === 'open-local') {
-    rclone.openLocal(this)
-  } else if (action === 'serve-start') {
-    rclone.serveStart(args[0], this)
-  } else if (action === 'serve-stop') {
-    rclone.serveStop(args[0], this)
-  } else if (action === 'open-ncdu') {
-    rclone.openNCDU(this)
-  } else if (action === 'open-web-browser') {
-    shell.openExternal(args[0])
-  } else if (action === 'open-config') {
-    shell.openItem(rclone.getConfigFile())
-  } else if (action === 'delete-bookmark') {
-    rclone.deleteBookmark(this.$name)
-  } else {
-    console.error('No such action', action, args, this)
+const bookmarkActionRouter = async function (action, ...args) {
+  try {
+    if (action === 'mount') {
+      await rclone.mount(this)
+    } else if (action === 'unmount') {
+      await rclone.unmount(this)
+    } else if (action === 'open-mounted') {
+      await rclone.openMountPoint(this)
+    } else if (action === 'download') {
+      await rclone.download(this)
+    } else if (action === 'stop-downloading') {
+      await rclone.stopDownload(this)
+    } else if (action === 'upload') {
+      await rclone.upload(this)
+    } else if (action === 'stop-uploading') {
+      await rclone.stopUpload(this)
+    } else if (action === 'toggle-automatic-upload') {
+      await rclone.toggleAutomaticUpload(this)
+    } else if (action === 'open-local') {
+      await rclone.openLocal(this)
+    } else if (action === 'serve-start') {
+      await rclone.serveStart(args[0], this)
+    } else if (action === 'serve-stop') {
+      await rclone.serveStop(args[0], this)
+    } else if (action === 'open-ncdu') {
+      await rclone.openNCDU(this)
+    } else if (action === 'open-web-browser') {
+      await shell.openExternal(args[0])
+    } else if (action === 'open-config') {
+      await shell.openPath(rclone.getConfigFile())
+    } else if (action === 'delete-bookmark') {
+      await rclone.deleteBookmark(this.$name)
+    } else {
+      console.error('No such action', action, args, this)
+    }
+  } catch (error) {
+    console.error(`Error executing action ${action}:`, error)
+    dialogs.rcloneAPIError(error.message)
   }
 }
 
@@ -356,7 +361,7 @@ const refreshTrayMenu = function () {
   // Set the menu.
   trayIndicator.setContextMenu(Menu.buildFromTemplate(menuItems))
 
-  // Set icon acording to the status
+  // Set icon according to the status
   trayIndicator.setImage(isConnected ? icons.connected : icons.default)
 }
 
@@ -364,6 +369,7 @@ const refreshTrayMenu = function () {
  * Refresh the tray menu.
  */
 const refresh = function () {
+  console.log('Refreshing tray menu')
   // Use some kind of static variable to store the timer
   if (refreshTrayMenuAtomicTimer) {
     clearTimeout(refreshTrayMenuAtomicTimer)
@@ -384,19 +390,23 @@ const init = function () {
   }
 
   if (process.platform === 'win32') {
+    console.log('Using windows icons')
     icons.default = path.join(__dirname, 'ui', 'icons', 'icon.ico')
     icons.connected = path.join(__dirname, 'ui', 'icons', 'icon-connected.ico')
   } else if (process.platform === 'linux') {
+    console.log('Using linux icons')
     // Using bigger images fixes the problem with blurry icon in some DE.
     icons.default = path.join(__dirname, 'ui', 'icons', 'icon.png')
     icons.connected = path.join(__dirname, 'ui', 'icons', 'icon-connected.png')
   } else {
+    console.log('Using template icons')
     icons.default = path.join(__dirname, 'ui', 'icons', 'iconTemplate.png')
     icons.connected = path.join(__dirname, 'ui', 'icons', 'icon-connectedTemplate.png')
   }
 
   // Add system tray icon.
   trayIndicator = new Tray(icons.default)
+  console.log('Tray icon set to', icons.default)
 }
 
 // Exports.

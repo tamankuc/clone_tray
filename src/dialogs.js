@@ -265,6 +265,14 @@ const missingRclone = function () {
 }
 
 /**
+ * Show Rclone API error dialog
+ * @param {string} detail Error details
+ */
+const rcloneAPIError = function (detail) {
+  dialog.showErrorBox('Rclone API Error', detail)
+}
+
+/**
  * Initialize module
 */
 const init = function () {
@@ -360,5 +368,6 @@ module.exports = {
   uncaughtException,
   confirmExit,
   missingRclone,
-  notification
+  notification,
+  rcloneAPIError
 }

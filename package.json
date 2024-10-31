@@ -97,7 +97,9 @@
         "chokidar": "^2.0.4",
         "electron-context-menu": "^0.10.1",
         "electron-is-dev": "^1.0.1",
-        "ini": "^1.3.5"
+        "encoding": "^0.1.13",
+        "ini": "^1.3.5",
+        "node-fetch": "^2.6.1"
     },
     "devDependencies": {
         "electron": "^4.0.0",

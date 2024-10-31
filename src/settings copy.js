@@ -19,24 +19,18 @@ const cache = {
   rclone_use_bundled: true,
   rclone_config: '',
   custom_args: '',
-  rclone_api_enable: true,
-  rclone_api_port: 5572,
-  rclone_api_auth_enable: 1,
-  rclone_api_username: 'user',
-  rclone_api_password: 'pass',
+
   rclone_cache_files: 3,
   rclone_cache_directories: 10,
   rclone_sync_enable: true,
   rclone_sync_autoupload_delay: 5,
   rclone_ncdu_enable: false,
-  rclone_serving_http_enable: false,
+  rclone_serving_http_enable: true,
   rclone_serving_ftp_enable: false,
   rclone_serving_restic_enable: false,
   rclone_serving_webdav_enable: false,
   rclone_serving_username: 'user',
-  rclone_serving_password: 'pass',
-  rclone_rc_allow_origin: '*',
-  rclone_rc_no_auth: true,
+  rclone_serving_password: 'pass'
 }
 
 /**
