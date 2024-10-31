@@ -176,6 +176,140 @@ const executeCliCommand = async function(endpoint, params) {
   }
 }
 
+/**
+ * Параметры монтирования по умолчанию
+ * @private
+ */
+const DEFAULT_MOUNT_OPTIONS = {
+  '_rclonetray_mount_enabled': false,     // Включено ли автомонтирование
+  '_rclonetray_mount_path': '',           // Кастомный путь монтирования (если пусто - используется стандартный)
+  '_rclonetray_mount_options': {          // Дополнительные опции монтирования
+      '--vfs-cache-mode': 'writes',
+      '--dir-cache-time': '30m',
+      '--vfs-cache-max-age': '24h',
+      '--vfs-read-ahead': '128M',
+      '--buffer-size': '32M'
+  }
+};
+
+/**
+* Получить настройки монтирования из конфига
+* @private
+*/
+const getMountConfig = function(bookmark) {
+  const mountConfig = {
+      enabled: false,
+      path: '',
+      options: {}
+  };
+
+  if (bookmark.options) {
+      // Получаем значение enabled
+      if ('_rclonetray_mount_enabled' in bookmark.options) {
+          mountConfig.enabled = bookmark.options._rclonetray_mount_enabled === 'true';
+      }
+
+      // Получаем кастомный путь
+      if ('_rclonetray_mount_path' in bookmark.options) {
+          mountConfig.path = bookmark.options._rclonetray_mount_path;
+      }
+
+      // Получаем дополнительные опции
+      Object.keys(bookmark.options).forEach(key => {
+          if (key.startsWith('_rclonetray_mount_opt_')) {
+              const optionName = '--' + key.replace('_rclonetray_mount_opt_', '');
+              mountConfig.options[optionName] = bookmark.options[key];
+          }
+      });
+  }
+
+  return mountConfig;
+};
+
+/**
+* Сохранить настройки монтирования в конфиг
+* @private
+*/
+const saveMountConfig = function(bookmark, config) {
+  if (!bookmark.options) {
+      bookmark.options = {};
+  }
+
+  // Сохраняем enabled
+  bookmark.options._rclonetray_mount_enabled = config.enabled.toString();
+
+  // Сохраняем путь
+  if (config.path) {
+      bookmark.options._rclonetray_mount_path = config.path;
+  } else {
+      delete bookmark.options._rclonetray_mount_path;
+  }
+
+  // Сохраняем опции
+  Object.keys(bookmark.options).forEach(key => {
+      if (key.startsWith('_rclonetray_mount_opt_')) {
+          delete bookmark.options[key];
+      }
+  });
+
+  Object.entries(config.options).forEach(([key, value]) => {
+      const optionKey = '_rclonetray_mount_opt_' + key.replace('--', '');
+      bookmark.options[optionKey] = value;
+  });
+
+  // Сохраняем в конфиг
+  updateBookmark(bookmark.$name, bookmark);
+};
+
+
+
+/**
+* Получить опции монтирования
+* @private
+*/
+const getMountOptions = function(bookmark) {
+  const config = getMountConfig(bookmark);
+  return {
+      ...DEFAULT_MOUNT_OPTIONS._rclonetray_mount_options,
+      ...config.options
+  };
+};
+
+/**
+* Монтировать удаленную папку
+* @param {object} bookmark Закладка для монтирования
+* @returns {Promise<boolean>}
+*/
+
+
+/**
+* Размонтировать удаленную папку
+* @param {object} bookmark Закладка для размонтирования
+* @returns {Promise<boolean>}
+*/
+
+
+/**
+* Восстановить состояния монтирования
+*/
+const restoreMountStates = async function() {
+  try {
+      const bookmarks = getBookmarks();
+      for (const bookmarkName in bookmarks) {
+          const bookmark = bookmarks[bookmarkName];
+          const config = getMountConfig(bookmark);
+          
+          if (config.enabled) {
+              console.log('Auto-mounting', bookmarkName);
+              await mount(bookmark);
+          }
+      }
+  } catch (error) {
+      console.error('Failed to restore mount states:', error);
+  }
+};
+
+
 const stopRcloneAPI = async function() {
   if (Cache.apiProcess) {
     Cache.apiProcess.kill()
@@ -503,62 +637,29 @@ const getVersion = function() {
 const onUpdate = function(callback) {
   UpdateCallbacksRegistry.push(callback)
 }
+
 /**
- * Получить путь для монтирования закладки
- * @private
- */
+* Получить путь для монтирования закладки
+* @private
+*/
 const getMountPath = function(bookmark) {
+  const config = getMountConfig(bookmark);
+  if (config.path) {
+      return config.path;
+  }
+  
   const mountDir = path.join(app.getPath('userData'), 'mounts');
   if (!fs.existsSync(mountDir)) {
       fs.mkdirSync(mountDir, { recursive: true });
   }
   return path.join(mountDir, bookmark.$name);
-}
-
+};
 /**
 * Монтировать удаленную папку
 * @param {object} bookmark Закладка для монтирования
 * @returns {Promise<boolean>}
 */
-const mount = async function(bookmark) {
-  try {
-      const mountPoint = "/tmp/lol3";
-      // const mountPoint = getMountPath(bookmark);
-      
-      // Проверяем, не смонтировано ли уже
-      if (Cache.mountPoints[bookmark.$name]) {
-          console.log('Already mounted:', bookmark.$name);
-          return true;
-      }
 
-      // Создаем директорию для монтирования если её нет
-      if (!fs.existsSync(mountPoint)) {
-          fs.mkdirSync(mountPoint, { recursive: true });
-      }
-
-      // Формируем имя remote для монтирования
-      const remoteName = bookmark.$name + ':';
-
-      console.log('Mounting', remoteName, 'to', mountPoint);
-
-      await Cache.apiService.createMount(remoteName, mountPoint);
-      
-      // Сохраняем информацию о монтировании
-      Cache.mountPoints[bookmark.$name] = {
-          path: mountPoint,
-          remote: remoteName
-      };
-
-      // Уведомляем об изменениях
-      UpdateCallbacksRegistry.forEach(callback => callback());
-
-      return true;
-  } catch (error) {
-      console.error('Mount error:', error);
-      dialogs.rcloneAPIError(`Failed to mount ${bookmark.$name}: ${error.message}`);
-      return false;
-  }
-}
 
 const updateMountPointsCache = async function() {
   try {
@@ -605,6 +706,11 @@ const unmount = async function(bookmark) {
       
       delete Cache.mountPoints[bookmark.$name];
 
+      // Сохраняем состояние в конфиг
+      const config = getMountConfig(bookmark);
+      config.enabled = false;
+      saveMountConfig(bookmark, config);
+
       // Уведомляем об изменениях
       UpdateCallbacksRegistry.forEach(callback => callback());
 
@@ -614,7 +720,7 @@ const unmount = async function(bookmark) {
       dialogs.rcloneAPIError(`Failed to unmount ${bookmark.$name}: ${error.message}`);
       return false;
   }
-}
+};
 
 /**
 * Получить статус монтирования закладки
@@ -640,8 +746,61 @@ const openMountPoint = async function(bookmark) {
   }
   return false;
 }
-// Mount functions - stubs for now
 
+
+// Mount functions - stubs for now
+const mount = async function(bookmark) {
+  try {
+      const mountPoint = getMountPath(bookmark);
+      
+      // Проверяем, не смонтировано ли уже
+      if (Cache.mountPoints[bookmark.$name]) {
+          console.log('Already mounted:', bookmark.$name);
+          return true;
+      }
+
+      // Создаем директорию для монтирования если её нет
+      if (!fs.existsSync(mountPoint)) {
+          fs.mkdirSync(mountPoint, { recursive: true });
+      }
+
+      // Формируем имя remote и опции
+      const remoteName = bookmark.$name + ':';
+      const options = getMountOptions(bookmark);
+
+      console.log('Mounting', remoteName, 'to', mountPoint, 'with options:', options);
+
+      // Собираем параметры для API
+      const mountParams = {
+          fs: remoteName,
+          mountPoint: mountPoint,
+          mountOpt: options
+      };
+
+      await Cache.apiService.createMount(mountParams);
+      
+      // Сохраняем информацию о монтировании
+      Cache.mountPoints[bookmark.$name] = {
+          path: mountPoint,
+          remote: remoteName,
+          options: options
+      };
+
+      // Сохраняем состояние в конфиг
+      const config = getMountConfig(bookmark);
+      config.enabled = true;
+      saveMountConfig(bookmark, config);
+
+      // Уведомляем об изменениях
+      UpdateCallbacksRegistry.forEach(callback => callback());
+
+      return true;
+  } catch (error) {
+      console.error('Mount error:', error);
+      dialogs.rcloneAPIError(`Failed to mount ${bookmark.$name}: ${error.message}`);
+      return false;
+  }
+};
 
 // Download/Upload functions - stubs for now
 const download = async function(bookmark) { return false }
