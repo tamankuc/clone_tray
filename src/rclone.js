@@ -412,15 +412,18 @@ const init = async function() {
     console.log('Using config file:', Cache.configFile)
 
     // Initialize caches
-    await updateProvidersCache()
-    await updateBookmarksCache()
+    await updateProvidersCache();
+    await updateBookmarksCache();
+    if (apiStarted) {
+        await updateMountPointsCache();
+    }
 
-    console.log('Rclone initialized successfully')
+    console.log('Rclone initialized successfully');
     
-  } catch (error) {
-    console.error('Failed to initialize rclone:', error)
-    throw error
-  }
+} catch (error) {
+    console.error('Failed to initialize rclone:', error);
+    throw error;
+}
 }
 
 const prepareQuit = async function() {
@@ -462,6 +465,8 @@ const addBookmark = function(name, config) {
   UpdateCallbacksRegistry.forEach(callback => callback())
 }
 
+
+
 const updateBookmark = function(name, config) {
   if (!(name in Cache.bookmarks)) {
     throw new Error(`Bookmark ${name} not found`)
@@ -498,12 +503,145 @@ const getVersion = function() {
 const onUpdate = function(callback) {
   UpdateCallbacksRegistry.push(callback)
 }
+/**
+ * Получить путь для монтирования закладки
+ * @private
+ */
+const getMountPath = function(bookmark) {
+  const mountDir = path.join(app.getPath('userData'), 'mounts');
+  if (!fs.existsSync(mountDir)) {
+      fs.mkdirSync(mountDir, { recursive: true });
+  }
+  return path.join(mountDir, bookmark.$name);
+}
 
+/**
+* Монтировать удаленную папку
+* @param {object} bookmark Закладка для монтирования
+* @returns {Promise<boolean>}
+*/
+const mount = async function(bookmark) {
+  try {
+      const mountPoint = "/tmp/lol3";
+      // const mountPoint = getMountPath(bookmark);
+      
+      // Проверяем, не смонтировано ли уже
+      if (Cache.mountPoints[bookmark.$name]) {
+          console.log('Already mounted:', bookmark.$name);
+          return true;
+      }
+
+      // Создаем директорию для монтирования если её нет
+      if (!fs.existsSync(mountPoint)) {
+          fs.mkdirSync(mountPoint, { recursive: true });
+      }
+
+      // Формируем имя remote для монтирования
+      const remoteName = bookmark.$name + ':';
+
+      console.log('Mounting', remoteName, 'to', mountPoint);
+
+      await Cache.apiService.createMount(remoteName, mountPoint);
+      
+      // Сохраняем информацию о монтировании
+      Cache.mountPoints[bookmark.$name] = {
+          path: mountPoint,
+          remote: remoteName
+      };
+
+      // Уведомляем об изменениях
+      UpdateCallbacksRegistry.forEach(callback => callback());
+
+      return true;
+  } catch (error) {
+      console.error('Mount error:', error);
+      dialogs.rcloneAPIError(`Failed to mount ${bookmark.$name}: ${error.message}`);
+      return false;
+  }
+}
+
+const updateMountPointsCache = async function() {
+  try {
+      // Получаем список текущих монтирований
+      const response = await Cache.apiService.listMounts();
+      
+      // Очищаем текущий кеш
+      Cache.mountPoints = {};
+      
+      // Обновляем кеш монтирований
+      if (response && response.mountPoints) {
+          Object.entries(response.mountPoints).forEach(([mountPoint, remoteInfo]) => {
+              const remoteName = remoteInfo.fs.split(':')[0];
+              Cache.mountPoints[remoteName] = {
+                  path: mountPoint,
+                  remote: remoteInfo.fs
+              };
+          });
+      }
+      
+      if (isDev) {
+          console.log('Updated mount points cache:', Cache.mountPoints);
+      }
+  } catch (error) {
+      console.error('Failed to update mount points cache:', error);
+  }
+}
+/**
+* Отмонтировать удаленную папку
+* @param {object} bookmark Закладка для размонтирования
+* @returns {Promise<boolean>}
+*/
+const unmount = async function(bookmark) {
+  try {
+      if (!Cache.mountPoints[bookmark.$name]) {
+          console.log('Not mounted:', bookmark.$name);
+          return true;
+      }
+
+      const mountPoint = Cache.mountPoints[bookmark.$name].path;
+      console.log('Unmounting', mountPoint);
+
+      await Cache.apiService.unmount(mountPoint);
+      
+      delete Cache.mountPoints[bookmark.$name];
+
+      // Уведомляем об изменениях
+      UpdateCallbacksRegistry.forEach(callback => callback());
+
+      return true;
+  } catch (error) {
+      console.error('Unmount error:', error);
+      dialogs.rcloneAPIError(`Failed to unmount ${bookmark.$name}: ${error.message}`);
+      return false;
+  }
+}
+
+/**
+* Получить статус монтирования закладки
+* @param {object} bookmark Закладка для проверки
+* @returns {boolean|string} false если не смонтировано, путь монтирования если смонтировано
+*/
+const getMountStatus = function(bookmark) {
+  if (Cache.mountPoints[bookmark.$name]) {
+      return Cache.mountPoints[bookmark.$name].path;
+  }
+  return false;
+}
+
+/**
+* Открыть точку монтирования в файловом менеджере
+* @param {object} bookmark Закладка для открытия
+*/
+const openMountPoint = async function(bookmark) {
+  const mountPoint = getMountStatus(bookmark);
+  if (mountPoint) {
+      await shell.openPath(mountPoint);
+      return true;
+  }
+  return false;
+}
 // Mount functions - stubs for now
-const mount = async function(bookmark) { return false }
-const unmount = async function(bookmark) { return false }
-const getMountStatus = function(bookmark) { return false }
-const openMountPoint = async function(bookmark) { return false }
+
 
 // Download/Upload functions - stubs for now
 const download = async function(bookmark) { return false }
