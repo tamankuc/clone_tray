@@ -304,6 +304,26 @@ const rcloneAPIError = function (detail) {
   dialog.showErrorBox('Rclone API Error', detail)
 }
 
+const addSyncPoint = function(bookmark, suggestedName) {
+  return new Promise((resolve) => {
+      const dialog = createNewDialog('AddSyncPoint', {
+          $singleId: `add_sync_${bookmark.$name}`,
+          width: 500,
+          height: 320,
+          title: 'Add Sync Point',
+          minimizable: false,
+      }, {
+          bookmark: bookmark,
+          suggestedName: suggestedName
+      });
+
+      dialog.on('closed', () => {
+          resolve(true);
+      });
+  });
+};
+
+
 /**
  * Initialize module
 */

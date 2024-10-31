@@ -824,6 +824,77 @@ const openMountPoint = async function(bookmark) {
   return false;
 }
 
+/**
+ * Параметры синхронизации по умолчанию
+ */
+const DEFAULT_SYNC_OPTIONS = {
+  '_rclonetray_sync_enabled': false,
+  '_rclonetray_sync_local_path': '',
+  '_rclonetray_sync_remote_path': '',
+  '_rclonetray_sync_mode': 'bisync',
+  '_rclonetray_sync_direction': 'upload'
+};
+
+/**
+* Получить все точки синхронизации для закладки
+*/
+const getSyncOptionSets = function(bookmark) {
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const optionSets = [];
+  const bookmarkName = bookmark.$name;
+
+  // Ищем конфигурации синхронизации
+  Object.keys(config).forEach(section => {
+      if (section.startsWith(`${bookmarkName}.sync_`)) {
+          const syncName = section.split('sync_')[1];
+          optionSets.push({
+              name: `Sync ${syncName}`,
+              id: syncName,
+              config: getSyncConfig(bookmark, syncName)
+          });
+      }
+  });
+
+  return optionSets;
+};
+
+/**
+* Получить конфигурацию точки синхронизации
+*/
+const getSyncConfig = function(bookmark, syncName) {
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+  
+  if (!config[sectionKey]) {
+      return null;
+  }
+
+  return {
+      enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
+      localPath: config[sectionKey]._rclonetray_sync_local_path || '',
+      remotePath: config[sectionKey]._rclonetray_sync_remote_path || '',
+      mode: config[sectionKey]._rclonetray_sync_mode || 'bisync',
+      direction: config[sectionKey]._rclonetray_sync_direction || 'upload'
+  };
+};
+
+/**
+* Сохранить конфигурацию точки синхронизации
+*/
+const saveSyncConfig = function(bookmark, config, syncName) {
+  const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+
+  rcloneConfig[sectionKey] = {
+      _rclonetray_sync_enabled: config.enabled.toString(),
+      _rclonetray_sync_local_path: config.localPath,
+      _rclonetray_sync_remote_path: config.remotePath,
+      _rclonetray_sync_mode: config.mode,
+      _rclonetray_sync_direction: config.direction
+  };
+
+  fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
+};
 
 /**
 * Монтировать удаленную папку

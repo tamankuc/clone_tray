@@ -162,6 +162,67 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
               }
           );
       }
+      // После секции с точками монтирования
+const syncOptionSets = rclone.getSyncOptionSets(bookmark);
+
+if (syncOptionSets.length > 0) {
+    template.submenu.push({ type: 'separator' });
+
+    // Добавляем точки синхронизации
+    syncOptionSets.forEach(sync => {
+        const isActive = rclone.getSyncStatus(bookmark, sync.id);
+        
+        template.submenu.push({
+            label: sync.config.remotePath ? 
+                `${sync.name} (${sync.config.remotePath})` : 
+                sync.name,
+            type: 'checkbox',
+            checked: !!isActive,
+            enabled: !isActive,
+            click: () => {
+                rclone.startSync(bookmark, sync.id)
+                    .then(() => refresh())
+                    .catch(error => console.error('Sync error:', error));
+            }
+        });
+
+        if (isActive) {
+            template.submenu.push(
+                {
+                    label: `Stop ${sync.name}`,
+                    click: () => {
+                        rclone.stopSync(bookmark, sync.id)
+                            .then(() => refresh())
+                            .catch(error => console.error('Stop sync error:', error));
+                    }
+                },
+                {
+                    label: `Open ${sync.name} In ${fileExplorerLabel}`,
+                    click: () => shell.openPath(sync.config.localPath)
+                }
+            );
+        }
+    });
+}
+
+// Добавляем кнопку создания новой точки синхронизации
+template.submenu.push(
+    { type: 'separator' },
+    {
+        label: 'Add Sync Point...',
+        click: async () => {
+            try {
+                const result = await dialogs.addSyncPoint(bookmark, `sync${syncOptionSets.length + 1}`);
+                if (result) {
+                    refresh();
+                }
+            } catch (error) {
+          console.error('Error adding sync point:', error);
+          dialogs.rcloneAPIError('Failed to add sync point: ' + error.message);
+        }
+      }
+      }
+    );
   });
 
   // Добавляем создание нового маунта через диалог
