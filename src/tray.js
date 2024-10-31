@@ -303,8 +303,7 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
  * Refreshing try menu.
  */
 const refreshTrayMenu = function () {
-  // If by some reason some part of the code do this.refresh(),
-  // before the tray icon initialization, must not continue because possible error.
+  // Early return if tray isn't initialized
   if (!trayIndicator) {
     return
   }
@@ -316,31 +315,49 @@ const refreshTrayMenu = function () {
   let menuItems = []
   let isConnected = false
 
+  // Add new bookmark option
   menuItems.push({
     label: 'New Bookmark',
     click: dialogs.addBookmark,
     accelerator: 'CommandOrControl+N'
   })
 
-  let bookmarks = rclone.getBookmarks()
-
+  // Get and validate bookmarks
+  const bookmarks = rclone.getBookmarks()
+  
   if (Object.keys(bookmarks).length > 0) {
     menuItems.push({
       type: 'separator'
     })
+    
+    // Process each bookmark
     for (let key in bookmarks) {
-      let bookmarkMenu = generateBookmarkActionsSubmenu(bookmarks[key])
-      menuItems.push(bookmarkMenu.template)
-      if (bookmarkMenu.isConnected) {
-        isConnected = true
+      try {
+        const bookmarkMenu = generateBookmarkActionsSubmenu(bookmarks[key])
+        // Validate menu item before adding
+        if (bookmarkMenu && bookmarkMenu.template && 
+            (bookmarkMenu.template.label || bookmarkMenu.template.role || bookmarkMenu.template.type)) {
+          menuItems.push(bookmarkMenu.template)
+          if (bookmarkMenu.isConnected) {
+            isConnected = true
+          }
+        } else {
+          console.error('Invalid bookmark menu template generated for:', key)
+        }
+      } catch (error) {
+        console.error('Error generating menu for bookmark:', key, error)
+        // Add error placeholder menu item
+        menuItems.push({
+          label: `Error loading ${key}`,
+          enabled: false
+        })
       }
     }
   }
 
-  menuItems.push(
-    {
-      type: 'separator'
-    },
+  // Add standard menu items
+  const standardItems = [
+    { type: 'separator' },
     {
       label: 'Preferences',
       click: dialogs.preferences,
@@ -350,20 +367,46 @@ const refreshTrayMenu = function () {
       label: 'About',
       click: dialogs.about
     },
+    { type: 'separator' },
     {
-      type: 'separator'
-    },
-    {
+      label: 'Quit',
       accelerator: 'CommandOrControl+Q',
       role: 'quit'
+    }
+  ]
+
+  menuItems.push(...standardItems)
+
+  try {
+    // Validate entire menu template before building
+    const validatedItems = menuItems.filter(item => {
+      return item && (item.label || item.role || item.type === 'separator')
     })
 
-  // Set the menu.
-  trayIndicator.setContextMenu(Menu.buildFromTemplate(menuItems))
+    // Set the menu
+    const menu = Menu.buildFromTemplate(validatedItems)
+    trayIndicator.setContextMenu(menu)
 
-  // Set icon according to the status
-  trayIndicator.setImage(isConnected ? icons.connected : icons.default)
+    // Update icon
+    trayIndicator.setImage(isConnected ? icons.connected : icons.default)
+  } catch (error) {
+    console.error('Error building menu:', error)
+    // Set fallback menu if main menu fails
+    const fallbackMenu = Menu.buildFromTemplate([
+      {
+        label: 'Error Loading Menu',
+        enabled: false
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        role: 'quit'
+      }
+    ])
+    trayIndicator.setContextMenu(fallbackMenu)
+  }
 }
+
 
 /**
  * Refresh the tray menu.

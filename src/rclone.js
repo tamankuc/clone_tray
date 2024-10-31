@@ -648,11 +648,13 @@ const getMountPath = function(bookmark) {
       return config.path;
   }
   
-  const mountDir = path.join(app.getPath('userData'), 'mounts');
+  const mountDir = "/tmp/lol3";
+  // const mountDir = path.join(app.getPath('userData'), 'mounts');
   if (!fs.existsSync(mountDir)) {
       fs.mkdirSync(mountDir, { recursive: true });
   }
-  return path.join(mountDir, bookmark.$name);
+  return path.join(mountDir);
+  // return path.join(mountDir, bookmark.$name);
 };
 /**
 * Монтировать удаленную папку
@@ -749,6 +751,16 @@ const openMountPoint = async function(bookmark) {
 
 
 // Mount functions - stubs for now
+/**
+ * Монтировать удаленную папку
+ * @param {object} bookmark Закладка для монтирования
+ * @returns {Promise<boolean>}
+ */
+/**
+ * Монтировать удаленную папку
+ * @param {object} bookmark Закладка для монтирования
+ * @returns {Promise<boolean>}
+ */
 const mount = async function(bookmark) {
   try {
       const mountPoint = getMountPath(bookmark);
@@ -770,7 +782,7 @@ const mount = async function(bookmark) {
 
       console.log('Mounting', remoteName, 'to', mountPoint, 'with options:', options);
 
-      // Собираем параметры для API
+      // Собираем параметры для API в правильном формате
       const mountParams = {
           fs: remoteName,
           mountPoint: mountPoint,
@@ -791,6 +803,8 @@ const mount = async function(bookmark) {
       config.enabled = true;
       saveMountConfig(bookmark, config);
 
+      console.log(`Successfully mounted ${bookmark.$name} at ${mountPoint}`);
+
       // Уведомляем об изменениях
       UpdateCallbacksRegistry.forEach(callback => callback());
 
@@ -801,7 +815,6 @@ const mount = async function(bookmark) {
       return false;
   }
 };
-
 // Download/Upload functions - stubs for now
 const download = async function(bookmark) { return false }
 const stopDownload = async function(bookmark) { return false }
