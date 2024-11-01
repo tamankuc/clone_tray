@@ -11,7 +11,11 @@ const settings = require('./settings')
 const dialogs = require('./dialogs')
 const fetch = require('node-fetch')
 const RcloneApiService = require('./RcloneApiService');
-let apiService = null;
+const RcloneSyncService = require('./RcloneSyncService')
+
+let apiService = null
+let syncService = null
+
 // Constants
 const UnsupportedRcloneProviders = [
   'union',
@@ -25,6 +29,7 @@ const BucketRequiredProviders = [
   'gsc',
   'hubic'
 ]
+
 /**
  * API URLs for Rclone operations
  * @private
@@ -77,6 +82,7 @@ const ApiUrls = {
   // Options
   getOptions: 'options/get'
 }
+
 const RcloneBinaryName = process.platform === 'win32' ? 'rclone.exe' : 'rclone'
 
 const RcloneBinaryBundled = app.isPackaged
@@ -97,7 +103,8 @@ const Cache = {
   automaticUploads: {},
   servePoints: {},
   apiProcess: null,
-  apiEndpoint: null
+  apiEndpoint: null,
+  syncPoints: new Map()
 }
 
 const UpdateCallbacksRegistry = []
@@ -396,7 +403,7 @@ const startRcloneAPI = async function() {
           try {
               execSync(`${rcloneBinary} version`);
           } catch (error) {
-              console.error('Не найден бинарный файл rclone:', error);
+              console.error('Н найден бинарный файл rclone:', error);
               resolve(false);
               return;
           }
@@ -485,7 +492,7 @@ const startRcloneAPI = async function() {
               
               startupTimeout = setTimeout(() => {
                   if (!isStarted) {
-                      console.error('Превышено время запуска Rclone API');
+                      console.error('Превышено время запука Rclone API');
                       if (checkInterval) clearInterval(checkInterval);
                       if (apiProcess.pid) {
                           try {
@@ -576,7 +583,19 @@ const init = async function() {
     
     if (apiStarted) {
       console.log('Rclone API server started successfully')
-    } else {
+      // Создаем API сервис
+      apiService = new RcloneApiService(settings.get('rclone_api_port'), 'user', 'pass')
+      
+      // Создаем Sync сервис с зависимостями
+      syncService = new RcloneSyncService(apiService, {
+          getSyncConfig: getSyncConfig,  // Передаем функцию получения конфигурации
+          saveSyncConfig: saveSyncConfig // Передаем функцию сохранения конфигурации
+      })
+      
+      // Сохраняем в кеш
+      Cache.apiService = apiService
+      Cache.syncService = syncService
+  } else {
       console.log('Running in CLI mode')
     }
 
@@ -605,6 +624,9 @@ const init = async function() {
 }
 
 const prepareQuit = async function() {
+  if (syncService) {
+      await syncService.cleanup();
+  }
   await stopRcloneAPI()
 }
 
@@ -843,58 +865,62 @@ const getSyncOptionSets = function(bookmark) {
   const optionSets = [];
   const bookmarkName = bookmark.$name;
 
-  // Ищем конфигурации синхронизации
+  // Search for sync configurations
   Object.keys(config).forEach(section => {
       if (section.startsWith(`${bookmarkName}.sync_`)) {
           const syncName = section.split('sync_')[1];
-          optionSets.push({
-              name: `Sync ${syncName}`,
-              id: syncName,
-              config: getSyncConfig(bookmark, syncName)
-          });
+          const syncConfig = getSyncConfig(bookmark, syncName);
+          if (syncConfig) {
+              optionSets.push({
+                  name: `Sync ${syncName}`,
+                  id: syncName,
+                  config: syncConfig
+              });
+          }
       }
   });
 
   return optionSets;
 };
 
+
 /**
 * Получить конфигурацию точки синхронизации
 */
-const getSyncConfig = function(bookmark, syncName) {
-  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
-  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+// const getSyncConfig = function(bookmark, syncName) {
+//   const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+//   const sectionKey = `${bookmark.$name}.sync_${syncName}`;
   
-  if (!config[sectionKey]) {
-      return null;
-  }
+//   if (!config[sectionKey]) {
+//       return null;
+//   }
 
-  return {
-      enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
-      localPath: config[sectionKey]._rclonetray_sync_local_path || '',
-      remotePath: config[sectionKey]._rclonetray_sync_remote_path || '',
-      mode: config[sectionKey]._rclonetray_sync_mode || 'bisync',
-      direction: config[sectionKey]._rclonetray_sync_direction || 'upload'
-  };
-};
+//   return {
+//       enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
+//       localPath: config[sectionKey]._rclonetray_sync_local_path || '',
+//       remotePath: config[sectionKey]._rclonetray_sync_remote_path || '',
+//       mode: config[sectionKey]._rclonetray_sync_mode || 'bisync',
+//       direction: config[sectionKey]._rclonetray_sync_direction || 'upload'
+//   };
+// };
 
-/**
-* Сохранить конфигурацию точки синхронизации
-*/
-const saveSyncConfig = function(bookmark, config, syncName) {
-  const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
-  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+// /**
+// * Сохранить конфигурацию точки синхронизации
+// */
+// const saveSyncConfig = function(bookmark, config, syncName) {
+//   const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+//   const sectionKey = `${bookmark.$name}.sync_${syncName}`;
 
-  rcloneConfig[sectionKey] = {
-      _rclonetray_sync_enabled: config.enabled.toString(),
-      _rclonetray_sync_local_path: config.localPath,
-      _rclonetray_sync_remote_path: config.remotePath,
-      _rclonetray_sync_mode: config.mode,
-      _rclonetray_sync_direction: config.direction
-  };
+//   rcloneConfig[sectionKey] = {
+//       _rclonetray_sync_enabled: config.enabled.toString(),
+//       _rclonetray_sync_local_path: config.localPath,
+//       _rclonetray_sync_remote_path: config.remotePath,
+//       _rclonetray_sync_mode: config.mode,
+//       _rclonetray_sync_direction: config.direction
+//   };
 
-  fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
-};
+//   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
+// };
 
 /**
 * Монтировать удаленную папку
@@ -980,16 +1006,181 @@ const deleteMountConfig = async function(bookmark, configName) {
   // Обновляем кэш
   UpdateCallbacksRegistry.forEach(callback => callback())
 }
+// Constants
+// const DEFAULT_SYNC_OPTIONS = {
+//   '_rclonetray_sync_enabled': false,
+//   '_rclonetray_sync_local_path': '',
+//   '_rclonetray_sync_remote_path': '',
+//   '_rclonetray_sync_mode': 'bisync',
+//   '_rclonetray_sync_direction': 'upload'
+// };
+
+// Cache расширение
+Cache.syncPoints = new Map();
+
+/**
+* Получить все точки синхронизации для закладки
+*/
+// const getSyncOptionSets = function(bookmark) {
+//   const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+//   const optionSets = [];
+//   const bookmarkName = bookmark.$name;
+
+//   // Ищем конфигурации синхронизации
+//   Object.keys(config).forEach(section => {
+//       if (section.startsWith(`${bookmarkName}.sync_`)) {
+//           const syncName = section.split('sync_')[1];
+//           optionSets.push({
+//               name: `Sync ${syncName}`,
+//               id: syncName,
+//               config: getSyncConfig(bookmark, syncName)
+//           });
+//       }
+//   });
+
+//   return optionSets;
+// };
+
+/**
+* Получить конфигурацию точки синхронизации
+*/
+const getSyncConfig = function(bookmark, syncName) {
+  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+  
+  if (!config[sectionKey]) {
+      return null;
+  }
+
+  return {
+      enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
+      localPath: config[sectionKey]._rclonetray_sync_local_path || '',
+      remotePath: config[sectionKey]._rclonetray_sync_remote_path || '',
+      mode: config[sectionKey]._rclonetray_sync_mode || 'bisync',
+      direction: config[sectionKey]._rclonetray_sync_direction || 'upload'
+  };
+};
+
+/**
+* Сохранить конфигурацию токи синхронизации
+*/
+const saveSyncConfig = function(bookmark, config, syncName) {
+  const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+
+  rcloneConfig[sectionKey] = {
+      _rclonetray_sync_enabled: config.enabled.toString(),
+      _rclonetray_sync_local_path: config.localPath,
+      _rclonetray_sync_remote_path: config.remotePath,
+      _rclonetray_sync_mode: config.mode,
+      _rclonetray_sync_direction: config.direction
+  };
+
+  fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
+};
+
+/**
+* Форматирование ключа для кеша точек синхронизации
+*/
+const getSyncCacheKey = function(bookmarkName, syncName) {
+  return `${bookmarkName}@@sync_${syncName}`;
+};
+
+/**
+* Получить статус синхронизации
+*/
+const getSyncStatus = function(bookmark, syncName) {
+  return syncService ? syncService.getSyncStatus(bookmark, syncName) : false
+}
+
+const startSync = async function(bookmark, syncName) {
+  return syncService ? await syncService.startSync(bookmark, syncName) : false
+}
+
+const stopSync = async function(bookmark, syncName) {
+  return syncService ? await syncService.stopSync(bookmark, syncName) : false
+}
+
+/**
+* Мониторинг процесса синхронизации
+*/
+const _monitorSync = async function(bookmarkName, syncName) {
+  const cacheKey = getSyncCacheKey(bookmarkName, syncName);
+  const syncInfo = Cache.syncPoints.get(cacheKey);
+  
+  if (!syncInfo) {
+      return;
+  }
+
+  try {
+      const status = await Cache.apiService.makeRequest('job/status', 'POST', {
+          jobid: syncInfo.jobId
+      });
+
+      if (status.finished) {
+          if (status.error) {
+              console.error('Sync error:', status.error);
+              Cache.syncPoints.delete(cacheKey);
+          } else {
+              // Для bisync запускаем новую сессию
+              if (syncInfo.mode === 'bisync') {
+                  const bookmark = getBookmark(bookmarkName);
+                  if (bookmark) {
+                      startSync(bookmark, syncName);
+                  }
+              } else {
+                  Cache.syncPoints.delete(cacheKey);
+              }
+          }
+          return;
+      }
+
+      // Продолжаем мониторинг
+      setTimeout(() => _monitorSync(bookmarkName, syncName), 1000);
+  } catch (error) {
+      console.error('Monitor sync error:', error);
+      Cache.syncPoints.delete(cacheKey);
+  }
+};
 
 // Download/Upload functions - stubs for now
-const download = async function(bookmark) { return false }
-const stopDownload = async function(bookmark) { return false }
-const isDownload = function(bookmark) { return false }
-const upload = async function(bookmark) { return false }
-const stopUpload = async function(bookmark) { return false }
-const isUpload = function(bookmark) { return false }
-const isAutomaticUpload = function(bookmark) { return false }
-const toggleAutomaticUpload = async function(bookmark) { return false }
+const download = async function(bookmark) {
+    if (!syncService) return false;
+    return await syncService.startDownload(bookmark);
+};
+
+const stopDownload = async function(bookmark) {
+    if (!syncService) return false;
+    return await syncService.stopDownload(bookmark);
+};
+
+const isDownload = function(bookmark) {
+    return syncService ? syncService.isDownloading(bookmark) : false;
+};
+
+const upload = async function(bookmark) {
+    if (!syncService) return false;
+    return await syncService.startUpload(bookmark);
+};
+
+const stopUpload = async function(bookmark) {
+    if (!syncService) return false;
+    return await syncService.stopUpload(bookmark);
+};
+
+const isUpload = function(bookmark) {
+    return syncService ? syncService.isUploading(bookmark) : false;
+};
+
+const isAutomaticUpload = function(bookmark) {
+    return syncService ? syncService.isAutoUploadEnabled(bookmark) : false;
+};
+
+const toggleAutomaticUpload = async function(bookmark) {
+    if (!syncService) return false;
+    return await syncService.toggleAutoUpload(bookmark);
+};
+
 const openLocal = async function(bookmark) { return false }
 
 // Server functions - stubs for now
@@ -1053,7 +1244,6 @@ module.exports = {
   deleteMountConfig,
   getMountOptionSets,
   // For testing/debugging
-  Cache: isDev ? Cache : undefined,
   DEFAULT_MOUNT_OPTIONS,
   getMountConfig,
   getMountPath,
@@ -1061,5 +1251,23 @@ module.exports = {
   deleteMountConfig,
   getMountOptionSets,
   saveMountConfig,
-  Cache: isDev ? Cache : undefined
+  Cache: isDev ? Cache : undefined,
+  
+  // Sync functions
+  getSyncOptionSets,
+  getSyncConfig,
+  saveSyncConfig,
+  startSync,
+  stopSync,
+  getSyncStatus,
+
+  
+  // For testing/debugging
+  Cache: isDev ? Cache : undefined,
+  DEFAULT_MOUNT_OPTIONS,
+  DEFAULT_SYNC_OPTIONS,
+  isDownload,
+  isUpload,
+  isAutomaticUpload,
+
 }

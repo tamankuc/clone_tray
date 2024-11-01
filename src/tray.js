@@ -50,17 +50,17 @@ const bookmarkActionRouter = async function (action, ...args) {
     } else if (action === 'open-mounted') {
       await rclone.openMountPoint(this)
     } else if (action === 'download') {
-      await rclone.download(this)
+      await rclone.startDownload(this)
     } else if (action === 'stop-downloading') {
       await rclone.stopDownload(this)
     } else if (action === 'upload') {
-      await rclone.upload(this)
+      await rclone.startUpload(this)
     } else if (action === 'stop-uploading') {
       await rclone.stopUpload(this)
     } else if (action === 'toggle-automatic-upload') {
-      await rclone.toggleAutomaticUpload(this)
+      await rclone.toggleAutoUpload(this)
     } else if (action === 'open-local') {
-      await rclone.openLocal(this)
+      shell.openPath(this._rclonetray_local_path_map)
     } else if (action === 'serve-start') {
       await rclone.serveStart(args[0], this)
     } else if (action === 'serve-stop') {
@@ -89,10 +89,24 @@ const bookmarkActionRouter = async function (action, ...args) {
  * @returns {{}}
  */
 const generateBookmarkActionsSubmenu = function (bookmark) {
-  // If by some reason bookmark is broken, then show actions menu.
-  if (!bookmark.$name || !bookmark.type) {
+  // Validate bookmark
+  if (!bookmark || !bookmark.$name) {
+    console.error('Invalid bookmark:', bookmark)
     return {
-      label: bookmark.$name || '<Unknown>',
+      label: 'Invalid bookmark', 
+      enabled: false
+    }
+  }
+
+  // Skip entries containing .mount_ or .sync_
+  if (bookmark.$name.includes('.mount_') || bookmark.$name.includes('.sync_')) {
+    return null
+  }
+
+  // If bookmark type is missing, show repair menu
+  if (!bookmark.type) {
+    return {
+      label: bookmark.$name,
       enabled: false,
       type: 'submenu',
       submenu: [
@@ -102,14 +116,14 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
         },
         {
           label: 'Delete',
-          enabled: !!bookmark.$name,
+          enabled: true,
           click: bookmarkActionRouter.bind(bookmark, 'delete-bookmark')
         }
       ]
     }
   }
 
-  // Main template
+  // Main template for valid bookmarks
   let template = {
     type: 'submenu',
     submenu: []
@@ -521,7 +535,6 @@ const refreshTrayMenu = function () {
     trayIndicator.setContextMenu(fallbackMenu)
   }
 }
-
 
 /**
  * Refresh the tray menu.

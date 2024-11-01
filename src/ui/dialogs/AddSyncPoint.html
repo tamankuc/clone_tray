@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Add Sync Point</title>
+    <script>
+      window.$main.loadStyles();
+    </script>
+  </head>
+  <body>
+    <form id="form">
+      <div class="row">
+        <div class="cell-left">Sync Point Name:</div>
+        <div class="cell-right">
+          <input type="text" name="name" required />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell-left">Local Path:</div>
+        <div class="cell-right">
+          <input type="text" name="localPath" required />
+          <button type="button" id="browseButton">Browse</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell-left">Remote Path:</div>
+        <div class="cell-right">
+          <input
+            type="text"
+            name="remotePath"
+            placeholder="Optional remote subdirectory"
+          />
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="cell-left">Sync Mode:</div>
+        <div class="cell-right">
+          <select name="mode" id="syncMode">
+            <option value="bisync">Two-way Sync</option>
+            <option value="sync">One-way Sync</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row" id="directionRow" style="display: none">
+        <div class="cell-left">Direction:</div>
+        <div class="cell-right">
+          <select name="direction">
+            <option value="upload">Local to Remote</option>
+            <option value="download">Remote to Local</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="buttons">
+        <button type="button" id="cancelButton">Cancel</button>
+        <button type="submit">Add</button>
+      </div>
+    </form>
+
+    <script>
+      const props = window.$main.getProps();
+      const form = document.getElementById("form");
+      const syncMode = document.getElementById("syncMode");
+      const directionRow = document.getElementById("directionRow");
+      const browseButton = document.getElementById("browseButton");
+      const cancelButton = document.getElementById("cancelButton");
+
+      // Set initial name
+      form.elements.name.value = props.suggestedName || "";
+
+      // Show/hide direction based on sync mode
+      syncMode.addEventListener("change", () => {
+        directionRow.style.display = syncMode.value === "sync" ? "" : "none";
+      });
+
+      // Browse button handler
+      browseButton.addEventListener("click", (e) => {
+        e.preventDefault();
+        window.selectDirectory(form.elements.localPath.value, (selected) => {
+          if (selected && selected[0]) {
+            form.elements.localPath.value = selected[0];
+          }
+        });
+      });
+
+      // Cancel button handler
+      cancelButton.addEventListener("click", () => {
+        window.close();
+      });
+
+      // Form submit handler
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+
+        const config = {
+          enabled: false,
+          localPath: form.elements.localPath.value,
+          remotePath: form.elements.remotePath.value,
+          mode: form.elements.mode.value,
+          direction: form.elements.direction.value,
+        };
+
+        try {
+          window.$main.rclone.saveSyncConfig(
+            props.bookmark,
+            config,
+            form.elements.name.value
+          );
+          window.$main.refreshTray();
+          window.close();
+        } catch (error) {
+          window.errorBox(`Failed to add sync point: ${error.message}`);
+        }
+      });
+
+      // Auto-resize window
+      window.resizeToContent();
+    </script>
+  </body>
+</html>

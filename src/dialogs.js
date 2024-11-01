@@ -423,5 +423,5 @@ module.exports = {
   notification,
   rcloneAPIError,
   addMountPoint,
-  
+  addSyncPoint
 }
