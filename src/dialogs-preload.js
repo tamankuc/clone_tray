@@ -11,7 +11,7 @@ window.$main = {
     version: remote.app.getVersion()
   },
   refreshTray: remote.require('./tray').refresh,
-  rclone: remote.require('./rclone'),
+  rclone: remote.require('./services/rclone/rclone'),
   settings: remote.require('./settings')
 }
 

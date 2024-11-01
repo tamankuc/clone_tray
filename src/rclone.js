@@ -421,7 +421,8 @@ const startRcloneAPI = async function() {
               '--cache-dir=' + path.join(app.getPath('userData'), 'cache'),
               '--rc-user=user',
               '--rc-pass=pass',
-              '--rc-allow-origin=*'
+              '--rc-allow-origin=*',
+              '--no-check-certificate'
           ];
 
           if (isDev) {
@@ -534,7 +535,7 @@ const updateProvidersCache = async function() {
     })
     
     if (isDev) {
-      console.log('Updated providers cache:', Cache.providers)
+      // console.log('Updated providers cache:', Cache.providers)
     }
   } catch (error) {
     console.error('Failed to update providers cache:', error)
@@ -606,6 +607,7 @@ const init = async function() {
 
     // Set config file path
     Cache.configFile = settings.get('rclone_config') || path.join(app.getPath('userData'), 'rclone.conf')
+    Cache.configFile = settings.get('rclone_config')
     console.log('Using config file:', Cache.configFile)
 
     // Initialize caches

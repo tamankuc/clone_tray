@@ -10,6 +10,10 @@ const { app } = require('electron')
  */
 const settingsFile = path.join(app.getPath('userData'), 'settings.json')
 
+
+
+const defaultConfigPath = '/Users/vladislavkupriianov/.config/rclone'
+
 /**
  * Cache for current settings and predefine defaults.
  * @private
@@ -17,7 +21,7 @@ const settingsFile = path.join(app.getPath('userData'), 'settings.json')
 const cache = {
   tray_menu_show_type: true,
   rclone_use_bundled: true,
-  rclone_config: '',
+  rclone_config: path.join(app.getPath('home'), '.config', 'rclone', 'rclone.conf'),
   custom_args: '',
   rclone_api_enable: true,
   rclone_api_port: 5572,
@@ -45,6 +49,9 @@ const cache = {
  * @returns {boolean}
  */
 const has = function (item) {
+  // console.log('Checking if setting exists:', item);
+  // console.log('Current cache:', cache);
+  // console.log('Cache has item:', cache.hasOwnProperty(item));
   return cache.hasOwnProperty(item)
 }
 
@@ -55,7 +62,12 @@ const has = function (item) {
  * @returns {*}
  */
 const get = function (item, defaultValue) {
-  return has(item) ? cache[item] : defaultValue
+  console.log(settingsFile)
+
+  // console.log('Getting setting:', item);
+  // console.log('Current cache value:', cache[item]);
+  // console.log('Default value:', defaultValue);
+  return has(item) ? cache[item] : defaultValue;
 }
 
 /**
@@ -90,6 +102,9 @@ const remove = function (item) {
 const merge = function (settings) {
   Object.keys(settings).forEach(function (key) {
     cache[key] = settings[key]
+    if (key === 'rclone_config') {
+      cache[key] = path.join(app.getPath('home'), '.config', 'rclone', 'rclone.conf')
+    }
   })
   updateFile()
 }
