@@ -1,339 +1,449 @@
+/**
+ * Сервис для управления синхронизацией в Rclone
+ */
+
+const fs = require('fs'); // Добавляем импорт fs
+
 class RcloneSyncService {
-    constructor(apiService, dependencies) {
+    /**
+     * @param {Object} apiService - Сервис для работы с API Rclone
+     * @param {Function} getSyncConfig - Функция получения конфига синхронизации
+     * @param {Function} saveSyncConfig - Функция сохранения конфига синхронизации
+     */
+    constructor(apiService, getSyncConfig, saveSyncConfig) {
+        if (!apiService) {
+            throw new Error('apiService обязателен для RcloneSyncService');
+        }
+        if (!getSyncConfig) {
+            throw new Error('getSyncConfig обязателен для RcloneSyncService');
+        }
+        if (!saveSyncConfig) {
+            throw new Error('saveSyncConfig обязателен для RcloneSyncService');
+        }
+
         this.apiService = apiService;
+        this.getSyncConfig = getSyncConfig;
+        this.saveSyncConfig = saveSyncConfig;
         this.activeSyncs = new Map();
-        this.syncMonitors = new Map();
-        this.getSyncConfig = dependencies.getSyncConfig;
-        this.saveSyncConfig = dependencies.saveSyncConfig;
+        
+        // Интервал проверки здоровья процессов (в миллисекундах)
+        this.healthCheckInterval = 30000;
+        this._startHealthCheck();
     }
 
-    _getHistoryKey(path1, path2) {
-        return `${path1}::${path2}`;
+    /**
+     * Запуск периодической проверки здоровья процессов синхронизации
+     * @private
+     */
+    _startHealthCheck() {
+        setInterval(async () => {
+            for (const [syncKey, syncInfo] of this.activeSyncs) {
+                await this._checkSyncHealth(syncKey, syncInfo);
+            }
+        }, this.healthCheckInterval);
     }
-
-    _getSyncCacheKey(bookmarkName, syncName) {
-        return `${bookmarkName}@@${syncName}`;
-    }
-
-    getSyncStatus(bookmark, syncName) {
-        const cacheKey = this._getSyncCacheKey(bookmark.$name, syncName);
-        return this.activeSyncs.has(cacheKey);
-    }
-
-    async startSync(bookmark, syncName) {
-        const config = this.getSyncConfig(bookmark, syncName);
-        if (!config) {
-          console.error('Sync configuration not found');
-          return false;
-        }
-    
-        const cacheKey = this._getSyncCacheKey(bookmark.$name, syncName);
-        if (this.activeSyncs.has(cacheKey)) {
-          console.log('Sync already running for', cacheKey);
-          return false;
-        }
-    
-        try {
-          let srcFs, dstFs;
-          if (config.direction === 'download') {
-            srcFs = `${bookmark.$name}:${config.remotePath}`;
-            dstFs = config.localPath;
-          } else {
-            srcFs = config.localPath;
-            dstFs = `${bookmark.$name}:${config.remotePath}`;
-          }
-    
-          console.log(`Starting sync for ${srcFs} -> ${dstFs} (mode: ${config.mode})`);
-    
-          let response;
-          if (config.mode === 'bisync') {
-            response = await this._runBisync(srcFs, dstFs, true);
-          } else {
-            response = await this._runSync(srcFs, dstFs);
-          }
-    
-          if (response.jobid) {
-            console.log(`Started job ${response.jobid}`);
-            this.activeSyncs.set(cacheKey, {
-              jobId: response.jobid,
-              mode: config.mode,
-              config,
-              bookmark,
-              startTime: Date.now(),
-              path1: srcFs,
-              path2: dstFs
-            });
-    
-            this._monitorSync(cacheKey);
-            return true;
-          }
-    
-          throw new Error('Failed to start sync job');
-        } catch (error) {
-          console.error('Sync start error:', error);
-          this.activeSyncs.delete(cacheKey);
-          throw error;
-        }
-      }
-    
-      async _runBisync(path1, path2, resync) {
-        return await this.apiService.makeRequest('sync/bisync', 'POST', {
-          path1,
-          path2,
-          _async: true,
-          opt: {
-            'create-empty-src-dirs': true,
-            'track-renames': true,
-            'transfers': 10,
-            'checkers': 20,
-            'resync': resync,
-            'force': resync,  // Добавляем force: true при resync
-            'verbose': true,
-            'check-access': true,
-            'max-delete': '-1'
-          }
-        });
-      }
-    
-      async _runSync(srcFs, dstFs) {
-        return await this.apiService.makeRequest('sync/sync', 'POST', {
-          srcFs,
-          dstFs,
-          _async: true,
-          opt: {
-            'create-empty-src-dirs': true,
-            'track-renames': true,
-            'transfers': 4,
-            'checkers': 8,
-            'verbose': true
-          }
-        });
-      }
-    
-      async _monitorSync(cacheKey) {
-        const syncInfo = this.activeSyncs.get(cacheKey);
-        if (!syncInfo) {
-          return;
-        }
-    
-        try {
-          const status = await this.apiService.makeRequest('job/status', 'POST', {
+ /**
+     * Проверка здоровья процесса
+     * @private
+     */
+ async _checkSyncHealth(syncKey, syncInfo) {
+    try {
+        const status = await this.apiService.makeRequest('job/status', 'POST', {
             jobid: syncInfo.jobId
-          });
-    
-          if (status.finished) {
-            console.log(`Job ${syncInfo.jobId} finished:`, status);
-    
+        });
+
+        // Если процесс завершился
+        if (status.finished) {
+            console.log('Процесс bisync завершился:', status);
+            
+            // Проверяем на ошибки
             if (status.error) {
-              console.error('Sync error:', status.error);
-              this.activeSyncs.delete(cacheKey);
-    
-              if (status.error.includes('bisync aborted')) {
-                console.log('Bisync aborted, retrying with resync...');
-                const response = await this._runBisync(syncInfo.path1, syncInfo.path2, true);
-                if (response.jobid) {
-                  this.activeSyncs.set(cacheKey, {
-                    ...syncInfo,
-                    jobId: response.jobid,
-                    startTime: Date.now()
-                  });
-                  this._monitorSync(cacheKey);
-                }
-              }
-            } else {
-              console.log('Sync completed successfully');
-    
-              if (syncInfo.mode === 'bisync') {
-                console.log('Starting continuous monitoring...');
-                this.activeSyncs.delete(cacheKey);
-    
-                setTimeout(async () => {
-                  try {
-                    const response = await this._runBisync(syncInfo.path1, syncInfo.path2, false);
-                    if (response.jobid) {
-                      this.activeSyncs.set(cacheKey, {
-                        ...syncInfo,
-                        jobId: response.jobid,
-                        startTime: Date.now()
-                      });
-                      this._monitorSync(cacheKey);
-                    }
-                  } catch (error) {
-                    console.error('Error starting continuous sync:', error);
-                    if (error.message.includes('bisync aborted')) {
-                      console.log('Bisync aborted, retrying with resync...');
-                      const response = await this._runBisync(syncInfo.path1, syncInfo.path2, true);
-                      if (response.jobid) {
-                        this.activeSyncs.set(cacheKey, {
-                          ...syncInfo,
-                          jobId: response.jobid,
-                          startTime: Date.now()
-                        });
-                        this._monitorSync(cacheKey);
-                      }
-                    }
-                  }
-                }, 30000);
-              } else {
-                this.activeSyncs.delete(cacheKey);
-              }
-            }
-            return;
-          }
-    
-          this.syncMonitors.set(cacheKey, setTimeout(() => {
-            this._monitorSync(cacheKey);
-          }, 1000));
-        } catch (error) {
-          console.error('Monitor sync error:', error);
-    
-          if (error.message.includes('bisync aborted')) {
-            console.log('Bisync aborted, retrying with resync...');
-            const response = await this._runBisync(syncInfo.path1, syncInfo.path2, true);
-            if (response.jobid) {
-              this.activeSyncs.set(cacheKey, {
-                ...syncInfo,
-                jobId: response.jobid,
-                startTime: Date.now()
-              });
-              this._monitorSync(cacheKey);
-            }
-          } else {
-            this.syncMonitors.set(cacheKey, setTimeout(() => {
-              this._monitorSync(cacheKey);
-            }, 5000));
-          }
-        }
-      }
-
-    async _monitorSync(cacheKey) {
-        const syncInfo = this.activeSyncs.get(cacheKey);
-        if (!syncInfo) {
-            return;
-        }
-
-        try {
-            const status = await this.apiService.makeRequest('job/status', 'POST', {
-                jobid: syncInfo.jobId
-            });
-
-            if (status.finished) {
-                console.log(`Job ${syncInfo.jobId} finished:`, status);
-                
-                if (status.error) {
-                    console.error('Sync error:', status.error);
-                    this.activeSyncs.delete(cacheKey);
-                } else {
-                    console.log('Sync completed successfully');
-                    
-                    // После успешной синхронизации запускаем обычный bisync без resync
-                    if (syncInfo.mode === 'bisync') {
-                        console.log('Starting continuous monitoring...');
-                        this.activeSyncs.delete(cacheKey);
-                        
-                        setTimeout(async () => {
-                            try {
-                                const response = await this.apiService.makeRequest('sync/bisync', 'POST', {
-                                    path1: syncInfo.path1,
-                                    path2: syncInfo.path2,
-                                    _async: true,
-                                    opt: {
-                                        'create-empty-src-dirs': true,
-                                        'track-renames': true,
-                                        'transfers': 4,
-                                        'checkers': 8,
-                                        'resync': false,
-                                        'force': false,
-                                        'verbose': true
-                                    }
-                                });
-
-                                if (response.jobid) {
-                                    this.activeSyncs.set(cacheKey, {
-                                        ...syncInfo,
-                                        jobId: response.jobid,
-                                        startTime: Date.now()
-                                    });
-                                    this._monitorSync(cacheKey);
-                                }
-                            } catch (error) {
-                                console.error('Error starting continuous sync:', error);
-                            }
-                        }, 30000); // Проверяем каждые 30 секунд
-                    } else {
-                        this.activeSyncs.delete(cacheKey);
-                    }
-                }
+                console.error('Ошибка bisync:', status.error);
+                this.activeSyncs.delete(syncKey);
                 return;
             }
 
-            // Продолжаем мониторинг
-            this.syncMonitors.set(cacheKey, setTimeout(() => {
-                this._monitorSync(cacheKey);
-            }, 1000));
+            // Проверяем, прошло ли достаточно времени для следующего запуска
+            const now = Date.now();
+            if (now - syncInfo.lastRunTime >= this.bisyncInterval) {
+                // Успешное завершение, запускаем новую сессию
+                const [bookmarkName, configName] = syncKey.split('_');
+                const bookmark = { $name: bookmarkName };
+                const config = syncInfo.config;
 
-        } catch (error) {
-            console.error('Monitor sync error:', error);
-            
-            if (error.message.includes('bisync aborted')) {
-                console.log('Bisync aborted, cleaning up...');
-                this.activeSyncs.delete(cacheKey);
-                this.syncMonitors.delete(cacheKey);
-            } else {
-                this.syncMonitors.set(cacheKey, setTimeout(() => {
-                    this._monitorSync(cacheKey);
-                }, 5000));
+                // Удаляем старую запись перед новым запуском
+                this.activeSyncs.delete(syncKey);
+                
+                // Запускаем новую сессию
+                console.log('Запуск новой сессии bisync');
+                await this.startSync(bookmark, config);
             }
+        }
+    } catch (error) {
+        if (error.message && error.message.includes('job not found')) {
+            // Если задача не найдена, удаляем её из активных
+            console.log('Задача не найдена, удаляем из активных:', syncKey);
+            this.activeSyncs.delete(syncKey);
+        } else {
+            console.error('Ошибка проверки здоровья процесса:', error);
+        }
+    }
+}
+    /**
+     * Проверка статуса инициализации в конфиге
+     * @private
+     */
+    _checkInitialized(bookmark, config) {
+        try {
+            const syncConfig = this.getSyncConfig(bookmark, config.name);
+            return !!(syncConfig && syncConfig._rclonetray_sync_initialized === 'true');
+        } catch (error) {
+            console.error('Ошибка проверки статуса инициализации:', error);
+            return false;
         }
     }
 
+    /**
+     * Сохранение статуса инициализации
+     * @private
+     */
+    async _saveInitializationStatus(bookmark, config) {
+        try {
+            const existingConfig = this.getSyncConfig(bookmark, config.name);
+            
+            const updatedConfig = {
+                ...existingConfig,
+                enabled: existingConfig ? existingConfig.enabled : false,
+                localPath: config.localPath,
+                remotePath: config.remotePath,
+                mode: 'bisync',
+                _rclonetray_sync_initialized: 'true',
+                name: config.name
+            };
+
+            await this.saveSyncConfig(bookmark, updatedConfig, config.name);
+            console.log('Сохранен статус инициализации для', bookmark.$name, config.name);
+        } catch (error) {
+            console.error('Ошибка сохранения статуса инициализации:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Форматирование пути к удаленному хранилищу
+     * @private
+     */
+    _formatRemotePath(bookmark, path) {
+        return `${bookmark.$name}:${path}`;
+    }
+
+/**
+     * Запуск bisync
+     * @private
+     */
+async _runBisync(remotePath, localPath, useResync = false) {
+    try {
+        console.log('Запуск bisync между', remotePath, 'и', localPath, 
+                  useResync ? 'с resync' : 'в обычном режиме');
+        
+        const baseArgs = [
+            remotePath, 
+            localPath,
+            '--force',                           // Принудительная синхронизация
+            '--create-empty-src-dirs',           // Создавать пустые директории
+            '--resilient',                       // Устойчивость к ошибкам
+            '--ignore-case',                     // Игнорировать регистр
+            '--conflict-resolve', 'newer',       // Всегда выбирать более новую версию
+            '--compare', 'modtime,size',         // Сравнивать по времени модификации и размеру
+            '--modify-window', '2s',             // Окно модификации для сравнения времени
+            '--timeout', '30s',                  // Таймаут операций
+            '--transfers', '1',                  // Количество одновременных передач
+            '--ignore-listing-checksum',         // Не проверять контрольные суммы при листинге
+            '-v'                                 // Подробное логирование
+        ];
+
+        if (useResync) {
+            // При первой синхронизации
+            baseArgs.push('--resync');
+            baseArgs.push('--resync-mode', 'newer'); // Выбираем более новые файлы
+        }
+        
+        const response = await this.apiService.makeRequest('core/command', 'POST', {
+            command: 'bisync',
+            arg: baseArgs,
+            _async: 'true'
+        });
+
+        if (!response || !response.jobid) {
+            throw new Error('Не удалось получить ID задачи для bisync');
+        }
+
+        console.log('Bisync запущен с ID:', response.jobid);
+        return response.jobid;
+    } catch (error) {
+        console.error('Ошибка запуска bisync:', error);
+        throw error;
+    }
+}
+
+/**
+ * Запуск принудительной синхронизации
+ * @public
+ */
+async forceSync(bookmark, config) {
+    try {
+        const syncKey = `${bookmark.$name}_${config.name}`;
+        const syncInfo = this.activeSyncs.get(syncKey);
+
+        // Если есть активная синхронизация, останавливаем ее
+        if (syncInfo) {
+            await this.stopSync(bookmark, config.name);
+        }
+
+        console.log('Запуск принудительной синхронизации:', bookmark.$name, config.name);
+        
+        const localPath = config.localPath;
+        const remotePath = this._formatRemotePath(bookmark, config.remotePath);
+
+        // Запускаем bisync напрямую, он сам разберется кто новее
+        const bisyncJobId = await this._runBisync(remotePath, localPath, true);
+
+        // Сохраняем информацию об активной синхронизации
+        this.activeSyncs.set(syncKey, {
+            jobId: bisyncJobId,
+            config: config,
+            startTime: Date.now(),
+            lastRunTime: Date.now()
+        });
+
+        return true;
+    } catch (error) {
+        console.error('Ошибка принудительной синхронизации:', error);
+        throw error;
+    }
+}
+/**
+ * Выполнение начальной синхронизации для выравнивания состояния
+ * @private
+ */
+async _initialSync(remotePath, localPath) {
+    try {
+        console.log('Запуск начальной синхронизации между', remotePath, 'и', localPath);
+        
+        const response = await this.apiService.makeRequest('core/command', 'POST', {
+            command: 'sync',
+            arg: [
+                remotePath, 
+                localPath,
+                '--create-empty-src-dirs',    // Создавать пустые директории
+                '--inplace',                  // Прямая запись файлов
+                '--verbose',                  // Подробное логирование
+                '--track-renames',            // Отслеживание переименований
+                '--ignore-existing',          // Игнорировать существующие файлы при конфликтах
+                '--modify-window', '2s',      // Окно модификации для сравнения времени
+                '--timeout', '30s',           // Таймаут операций
+                '--transfers', '1'            // Количество одновременных передач
+            ],
+            _async: 'true'
+        });
+
+        if (!response || !response.jobid) {
+            throw new Error('Не удалось получить ID задачи для начальной синхронизации');
+        }
+
+        // Ждем завершения начальной синхронизации
+        await this._waitForJob(response.jobid);
+        console.log('Начальная синхронизация завершена');
+    } catch (error) {
+        console.error('Ошибка начальной синхронизации:', error);
+        throw error;
+    }
+}
+    /**
+     * Ожидание завершения задачи
+     * @private
+     */
+    async _waitForJob(jobId, timeout = 3600000) {
+        const startTime = Date.now();
+        
+        while (true) {
+            if (Date.now() - startTime > timeout) {
+                throw new Error('Превышено время ожидания задачи');
+            }
+
+            try {
+                const status = await this.apiService.makeRequest('job/status', 'POST', {
+                    jobid: jobId
+                });
+
+                if (status.finished) {
+                    if (status.error) {
+                        throw new Error(status.error);
+                    }
+                    return status;
+                }
+            } catch (error) {
+                if (error.message && error.message.includes('job not found')) {
+                    console.log('Задача не найдена, возможно уже завершена:', jobId);
+                    return null;
+                }
+                throw error;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+
+    /**
+     * Запуск синхронизации
+     * @public
+     */
+    async startSync(bookmark, config) {
+        try {
+            if (!config || !config.localPath || !config.remotePath) {
+                throw new Error('Некорректная конфигурация синхронизации');
+            }
+
+            console.log('Запуск синхронизации:', bookmark.$name, config.name);
+            const syncKey = `${bookmark.$name}_${config.name}`;
+            
+            // Проверяем, не запущена ли уже синхронизация
+            if (this.activeSyncs.has(syncKey)) {
+                const existingSync = this.activeSyncs.get(syncKey);
+                try {
+                    const status = await this.apiService.makeRequest('job/status', 'POST', {
+                        jobid: existingSync.jobId
+                    });
+                    
+                    if (!status.finished) {
+                        console.log('Синхронизация уже активна:', syncKey);
+                        return false;
+                    }
+                    
+                    this.activeSyncs.delete(syncKey);
+                } catch (error) {
+                    this.activeSyncs.delete(syncKey);
+                }
+            }
+
+            const localPath = config.localPath;
+            const remotePath = this._formatRemotePath(bookmark, config.remotePath);
+
+            let bisyncJobId;
+
+            // Проверяем необходимость инициализации
+            if (!this._checkInitialized(bookmark, config)) {
+                console.log('Первый запуск, выполняем инициализацию');
+                await this._initialSync(remotePath, localPath);
+                bisyncJobId = await this._runBisync(remotePath, localPath, true);
+                await this._waitForJob(bisyncJobId);
+                await this._saveInitializationStatus(bookmark, config);
+                bisyncJobId = await this._runBisync(remotePath, localPath, false);
+            } else {
+                console.log('Папка уже инициализирована, запускаем bisync');
+                bisyncJobId = await this._runBisync(remotePath, localPath, false);
+            }
+            
+            // Сохраняем информацию об активной синхронизации
+            this.activeSyncs.set(syncKey, {
+                jobId: bisyncJobId,
+                config: config,
+                startTime: Date.now(),
+                lastRunTime: Date.now()
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Ошибка запуска синхронизации:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Остановка синхронизации
+     * @public
+     */
     async stopSync(bookmark, syncName) {
-        const cacheKey = this._getSyncCacheKey(bookmark.$name, syncName);
-        const syncInfo = this.activeSyncs.get(cacheKey);
+        const syncKey = `${bookmark.$name}_${syncName}`;
+        const syncInfo = this.activeSyncs.get(syncKey);
         
         if (!syncInfo) {
+            console.log('Синхронизация не найдена:', syncKey);
             return false;
         }
 
         try {
-            console.log(`Stopping sync for ${bookmark.$name}/${syncName}`);
             await this.apiService.makeRequest('job/stop', 'POST', {
                 jobid: syncInfo.jobId
             });
-
-            // Очищаем состояние
-            this.activeSyncs.delete(cacheKey);
-            if (this.syncMonitors.has(cacheKey)) {
-                clearTimeout(this.syncMonitors.get(cacheKey));
-                this.syncMonitors.delete(cacheKey);
-            }
-
+            
+            this.activeSyncs.delete(syncKey);
+            console.log('Синхронизация остановлена:', syncKey);
             return true;
         } catch (error) {
-            console.error('Sync stop error:', error);
-            // В любом случае очищаем состояние
-            this.activeSyncs.delete(cacheKey);
-            this.syncMonitors.delete(cacheKey);
-            return false;
-        }
-    }
-
-    async cleanup() {
-        console.log('Cleaning up sync service...');
-        // Останавливаем все активные синхронизации
-        for (const [cacheKey, syncInfo] of this.activeSyncs.entries()) {
-            try {
-                await this.stopSync(syncInfo.bookmark, syncInfo.config.name);
-            } catch (error) {
-                console.error(`Failed to stop sync ${cacheKey}:`, error);
+            if (error.message && error.message.includes('job not found')) {
+                // Если задача не найдена, просто удаляем из активных
+                this.activeSyncs.delete(syncKey);
+                return true;
             }
+            console.error('Ошибка остановки синхронизации:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Получение статуса синхронизации
+     * @public
+     */
+    getSyncStatus(bookmark, syncName) {
+        const syncKey = `${bookmark.$name}_${syncName}`;
+        const syncInfo = this.activeSyncs.get(syncKey);
+        
+        if (!syncInfo) {
+            return {
+                status: 'idle'
+            };
         }
 
-        // Очищаем все таймеры
-        this.syncMonitors.forEach(timer => clearTimeout(timer));
-        this.syncMonitors.clear();
-        this.activeSyncs.clear();
+        return {
+            status: 'active',
+            startTime: syncInfo.startTime,
+            config: syncInfo.config
+        };
     }
+
+/**
+     * Очистка ресурсов при завершении работы
+     * @public
+     */
+async cleanup() {
+    const cleanupPromises = [];
+    
+    for (const [syncKey, syncInfo] of this.activeSyncs) {
+        try {
+            const [bookmarkName, syncName] = syncKey.split('_');
+            // Добавляем каждую операцию остановки в массив промисов
+            cleanupPromises.push(
+                this.stopSync({ $name: bookmarkName }, syncName)
+                    .catch(error => {
+                        console.error('Ошибка при очистке синхронизации:', syncKey, error);
+                    })
+            );
+        } catch (error) {
+            console.error('Ошибка при подготовке очистки синхронизации:', syncKey, error);
+        }
+    }
+
+    // Ждем завершения всех операций очистки
+    try {
+        await Promise.allSettled(cleanupPromises);
+        // Очищаем Map активных синхронизаций
+        this.activeSyncs.clear();
+        console.log('Все ресурсы синхронизации очищены');
+    } catch (error) {
+        console.error('Ошибка при финальной очистке ресурсов:', error);
+    }
+}
 }
 
 module.exports = RcloneSyncService;

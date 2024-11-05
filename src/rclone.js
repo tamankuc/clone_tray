@@ -30,6 +30,8 @@ const BucketRequiredProviders = [
   'hubic'
 ]
 
+
+
 /**
  * API URLs for Rclone operations
  * @private
@@ -548,30 +550,35 @@ const updateProvidersCache = async function() {
  */
 const updateBookmarksCache = async function() {
   try {
-    const response = await makeRcloneRequest('POST', ApiUrls.configDump)
-    Cache.bookmarks = {}
+      const response = await makeRcloneRequest('POST', ApiUrls.configDump);
+      Cache.bookmarks = {};
 
-    Object.keys(response).forEach(name => {
-      if (name !== 'RCLONE_ENCRYPT_V0') {
-        const bookmark = response[name]
-        bookmark.$name = name
-        Cache.bookmarks[name] = bookmark
+      Object.keys(response).forEach(name => {
+          // Пропускаем служебные секции
+          if (name === 'RCLONE_ENCRYPT_V0' || 
+              name.includes('.mount_') || 
+              name.includes('.sync_')) {
+              return;
+          }
+
+          const bookmark = response[name];
+          bookmark.$name = name;
+          Cache.bookmarks[name] = bookmark;
+      });
+
+      if (isDev) {
+          // console.log('Updated bookmarks cache:', Cache.bookmarks);
       }
-    })
-
-    if (isDev) {
-      console.log('Updated bookmarks cache:', Cache.bookmarks)
-    }
   } catch (error) {
-    console.error('Failed to update bookmarks cache:', error)
-    throw new Error('Failed to get rclone config')
+      console.error('Failed to update bookmarks cache:', error);
+      throw new Error('Failed to get rclone config');
   }
 }
 
-// Core functions
-/**
- * Initialize rclone with correct API URLs
- */
+//во время инициализации стартуем API
+// и создаем сервисы
+// и инициализируем кеш
+//
 const init = async function() {
   try {
     // Add /usr/local/bin to PATH on Unix systems
@@ -588,10 +595,11 @@ const init = async function() {
       apiService = new RcloneApiService(settings.get('rclone_api_port'), 'user', 'pass')
       
       // Создаем Sync сервис с зависимостями
-      syncService = new RcloneSyncService(apiService, {
-          getSyncConfig: getSyncConfig,  // Передаем функцию получения конфигурации
-          saveSyncConfig: saveSyncConfig // Передаем функцию сохранения конфигурации
-      })
+syncService = new RcloneSyncService(
+    apiService,
+    getSyncConfig,  // Функция получения конфига
+    saveSyncConfig  // Функция сохранения конфига
+);
       
       // Сохраняем в кеш
       Cache.apiService = apiService
@@ -852,11 +860,15 @@ const openMountPoint = async function(bookmark) {
  * Параметры синхронизации по умолчанию
  */
 const DEFAULT_SYNC_OPTIONS = {
-  '_rclonetray_sync_enabled': false,
-  '_rclonetray_sync_local_path': '',
-  '_rclonetray_sync_remote_path': '',
-  '_rclonetray_sync_mode': 'bisync',
-  '_rclonetray_sync_direction': 'upload'
+  enabled: false,
+  localPath: '',
+  remotePath: '',
+  mode: 'bisync',
+  direction: 'upload',
+  _rclonetray_sync_initialized: 'false',
+  transfers: '2',
+  checkers: '4',
+  'max-delete': '100'
 };
 
 /**
@@ -867,10 +879,17 @@ const getSyncOptionSets = function(bookmark) {
   const optionSets = [];
   const bookmarkName = bookmark.$name;
 
-  // Search for sync configurations
+  console.log('Looking for sync configs for bookmark:', bookmarkName);
+
+  // Ищем все секции конфигурации
   Object.keys(config).forEach(section => {
-      if (section.startsWith(`${bookmarkName}.sync_`)) {
-          const syncName = section.split('sync_')[1];
+      // Проверяем, что это секция синхронизации для данной закладки
+      if (section === `${bookmarkName}.sync_sync1` || 
+          section.startsWith(`${bookmarkName}.sync_`)) {
+          
+          const syncName = section.split(`${bookmarkName}.sync_`)[1];
+          // console.log('Found sync section:', section, 'with name:', syncName);
+          
           const syncConfig = getSyncConfig(bookmark, syncName);
           if (syncConfig) {
               optionSets.push({
@@ -882,9 +901,10 @@ const getSyncOptionSets = function(bookmark) {
       }
   });
 
+  // console.log(`Found ${optionSets.length} sync options for ${bookmarkName}:`, 
+  //             optionSets);
   return optionSets;
 };
-
 
 /**
 * Получить конфигурацию точки синхронизации
@@ -1044,42 +1064,167 @@ Cache.syncPoints = new Map();
 // };
 
 /**
-* Получить конфигурацию точки синхронизации
-*/
+ * Получить конфигурацию точки синхронизации
+ * @param {Object} bookmark - Закладка, для которой получаем конфигурацию
+ * @param {string} syncName - Имя конфигурации синхронизации
+ * @returns {Object|null} - Конфигурация синхронизации или null, если не найдена
+ */
 const getSyncConfig = function(bookmark, syncName) {
-  const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
-  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
-  
-  if (!config[sectionKey]) {
+  try {
+      const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+      const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+      
+      console.log('Getting sync config for section:', sectionKey);
+
+      // Если секции нет в конфиге, возвращаем null
+      if (!config[sectionKey]) {
+          console.log('Sync config section not found:', sectionKey);
+          return null;
+      }
+
+      // Считываем значения из конфига с fallback на значения по умолчанию
+      const syncConfig = {
+          name: syncName,
+          enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
+          localPath: config[sectionKey]._rclonetray_sync_local_path || DEFAULT_SYNC_OPTIONS.localPath,
+          remotePath: config[sectionKey]._rclonetray_sync_remote_path || DEFAULT_SYNC_OPTIONS.remotePath,
+          mode: config[sectionKey]._rclonetray_sync_mode || DEFAULT_SYNC_OPTIONS.mode,
+          direction: config[sectionKey]._rclonetray_sync_direction || DEFAULT_SYNC_OPTIONS.direction,
+          _rclonetray_sync_initialized: config[sectionKey]._rclonetray_sync_initialized || DEFAULT_SYNC_OPTIONS._rclonetray_sync_initialized,
+          transfers: config[sectionKey]._rclonetray_sync_transfers || DEFAULT_SYNC_OPTIONS.transfers,
+          checkers: config[sectionKey]._rclonetray_sync_checkers || DEFAULT_SYNC_OPTIONS.checkers,
+          'max-delete': config[sectionKey]._rclonetray_sync_max_delete || DEFAULT_SYNC_OPTIONS['max-delete']
+      };
+
+      // Проверяем обязательные поля
+      if (!syncConfig.localPath || !syncConfig.remotePath) {
+          console.log('Missing required fields in sync config');
+          return null;
+      }
+
+      console.log('Successfully loaded sync config:', syncConfig);
+      return syncConfig;
+  } catch (error) {
+      console.error('Error reading sync config:', error);
       return null;
   }
-
-  return {
-      enabled: config[sectionKey]._rclonetray_sync_enabled === 'true',
-      localPath: config[sectionKey]._rclonetray_sync_local_path || '',
-      remotePath: config[sectionKey]._rclonetray_sync_remote_path || '',
-      mode: config[sectionKey]._rclonetray_sync_mode || 'bisync',
-      direction: config[sectionKey]._rclonetray_sync_direction || 'upload'
-  };
 };
 
 /**
-* Сохранить конфигурацию токи синхронизации
-*/
-const saveSyncConfig = function(bookmark, config, syncName) {
-  const rcloneConfig = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
-  const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+ * Сохранить конфигурацию точки синхронизации
+ * @param {Object} bookmark - Закладка, для которой сохраняем конфигурацию
+ * @param {Object} syncConfig - Конфигурация для сохранения
+ * @param {string} syncName - Имя конфигурации синхронизации
+ * @returns {boolean} - Успешность сохранения
+ */
+const saveSyncConfig = function(bookmark, syncConfig, syncName) {
+  try {
+      // Проверяем входные параметры
+      if (!bookmark || !bookmark.$name || !syncConfig || !syncName) {
+          throw new Error('Missing required parameters for saving sync config');
+      }
 
-  rcloneConfig[sectionKey] = {
-      _rclonetray_sync_enabled: config.enabled.toString(),
-      _rclonetray_sync_local_path: config.localPath,
-      _rclonetray_sync_remote_path: config.remotePath,
-      _rclonetray_sync_mode: config.mode,
-      _rclonetray_sync_direction: config.direction
-  };
+      console.log('Saving sync config:', {
+          bookmarkName: bookmark.$name,
+          syncName: syncName,
+          config: syncConfig
+      });
 
-  fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
+      // Читаем текущий конфиг
+      const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+      const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+
+      // Создаем или обновляем секцию
+      config[sectionKey] = {
+          // Основные настройки
+          _rclonetray_sync_enabled: (syncConfig.enabled || DEFAULT_SYNC_OPTIONS.enabled).toString(),
+          _rclonetray_sync_local_path: syncConfig.localPath || DEFAULT_SYNC_OPTIONS.localPath,
+          _rclonetray_sync_remote_path: syncConfig.remotePath || DEFAULT_SYNC_OPTIONS.remotePath,
+          _rclonetray_sync_mode: syncConfig.mode || DEFAULT_SYNC_OPTIONS.mode,
+          _rclonetray_sync_direction: syncConfig.direction || DEFAULT_SYNC_OPTIONS.direction,
+          
+          // Статус инициализации
+          _rclonetray_sync_initialized: syncConfig._rclonetray_sync_initialized || DEFAULT_SYNC_OPTIONS._rclonetray_sync_initialized,
+          
+          // Дополнительные параметры
+          _rclonetray_sync_transfers: syncConfig.transfers || DEFAULT_SYNC_OPTIONS.transfers,
+          _rclonetray_sync_checkers: syncConfig.checkers || DEFAULT_SYNC_OPTIONS.checkers,
+          _rclonetray_sync_max_delete: syncConfig['max-delete'] || DEFAULT_SYNC_OPTIONS['max-delete']
+      };
+
+      // Сохраняем конфиг в файл
+      fs.writeFileSync(Cache.configFile, ini.stringify(config));
+      
+      // Обновляем кэш, если необходимо
+      if (Cache.syncPoints) {
+          const cacheKey = getSyncCacheKey(bookmark.$name, syncName);
+          Cache.syncPoints.set(cacheKey, { config: syncConfig });
+      }
+
+      console.log('Successfully saved sync config for:', sectionKey);
+      
+      // Уведомляем об изменениях
+      if (UpdateCallbacksRegistry) {
+          UpdateCallbacksRegistry.forEach(callback => callback());
+      }
+
+      return true;
+  } catch (error) {
+      console.error('Error saving sync config:', error);
+      throw error;
+  }
 };
+
+/**
+ * Создать новую конфигурацию синхронизации
+ * @param {Object} bookmark - Закладка
+ * @param {string} syncName - Имя новой конфигурации
+ * @returns {Object} - Созданная конфигурация
+ */
+const createSyncConfig = async function(bookmark, syncName) {
+  const newConfig = { ...DEFAULT_SYNC_OPTIONS, name: syncName };
+  await saveSyncConfig(bookmark, newConfig, syncName);
+  return newConfig;
+};
+
+/**
+* Удалить конфигурацию синхронизации
+* @param {Object} bookmark - Закладка
+* @param {string} syncName - Имя конфигурации для удаления
+* @returns {boolean} - Успешность удаления
+*/
+const deleteSyncConfig = function(bookmark, syncName) {
+  try {
+      const config = ini.parse(fs.readFileSync(Cache.configFile, 'utf-8'));
+      const sectionKey = `${bookmark.$name}.sync_${syncName}`;
+
+      // Проверяем, не активна ли синхронизация
+      const cacheKey = getSyncCacheKey(bookmark.$name, syncName);
+      if (Cache.syncPoints && Cache.syncPoints.has(cacheKey)) {
+          throw new Error('Cannot delete active sync configuration');
+      }
+
+      // Удаляем секцию из конфига
+      if (config[sectionKey]) {
+          delete config[sectionKey];
+          fs.writeFileSync(Cache.configFile, ini.stringify(config));
+          
+          // Уведомляем об изменениях
+          if (UpdateCallbacksRegistry) {
+              UpdateCallbacksRegistry.forEach(callback => callback());
+          }
+          
+          console.log('Successfully deleted sync config:', sectionKey);
+          return true;
+      }
+
+      return false;
+  } catch (error) {
+      console.error('Error deleting sync config:', error);
+      throw error;
+  }
+};
+
 
 /**
 * Форматирование ключа для кеша точек синхронизации

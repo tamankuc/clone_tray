@@ -201,7 +201,7 @@ const updateBookmarksCache = async function() {
     });
 
     if (isDev) {
-      console.log('Updated bookmarks cache:', Cache.bookmarks);
+      // console.log('Updated bookmarks cache:', Cache.bookmarks);
     }
   } catch (error) {
     console.error('Failed to update bookmarks cache:', error);

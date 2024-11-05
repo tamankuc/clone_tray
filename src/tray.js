@@ -6,6 +6,7 @@ const isDev = require('electron-is-dev')
 const settings = require('./settings')
 const rclone = require('./rclone')
 const dialogs = require('./dialogs')
+const RcloneSyncService = require('./RcloneSyncService');
 
 /**
  * Host the initialized Tray object.
@@ -99,8 +100,9 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
   }
 
   // Skip entries containing .mount_ or .sync_
-  if (bookmark.$name.includes('.mount_') || bookmark.$name.includes('.sync_')) {
-    return null
+  if (bookmark.$name.includes('.mount_') || 
+  bookmark.$name.includes('.sync_')) {
+    return null;
   }
 
   // If bookmark type is missing, show repair menu
@@ -139,7 +141,7 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
           template.submenu.push({ type: 'separator' });
       }
 
-      // Формируем метку с путем в remote, если он указан
+      // Формируем мтку с путем в remote, если он указан
       const mountLabel = config.remotePath ? 
           `${mountConfig.name} (${config.remotePath})` : 
           mountConfig.name;
@@ -176,7 +178,7 @@ const generateBookmarkActionsSubmenu = function (bookmark) {
               }
           );
       }
-      // После секции с точками монтирования
+      // Посе секции с точками монтирования
 const syncOptionSets = rclone.getSyncOptionSets(bookmark);
 
 if (syncOptionSets.length > 0) {
@@ -184,21 +186,27 @@ if (syncOptionSets.length > 0) {
 
     // Добавляем точки синхронизации
     syncOptionSets.forEach(sync => {
-        const isActive = rclone.getSyncStatus(bookmark, sync.id);
+        const syncStatus = rclone.getSyncStatus(bookmark, sync.id);
+        const isActive = syncStatus && syncStatus.status !== 'idle';
+        console.log('syncStatus', syncStatus);
         
         template.submenu.push({
-            label: sync.config.remotePath ? 
-                `${sync.name} (${sync.config.remotePath})` : 
-                sync.name,
-            type: 'checkbox',
-            checked: !!isActive,
-            enabled: !isActive,
-            click: () => {
-                rclone.startSync(bookmark, sync.id)
-                    .then(() => refresh())
-                    .catch(error => console.error('Sync error:', error));
-            }
-        });
+          label: sync.config.remotePath ? 
+              `${sync.name} (${sync.config.remotePath})` : 
+              sync.name,
+          type: 'checkbox',
+          checked: isActive,
+          enabled: !isActive,
+          click: () => {
+              const syncService = new RcloneSyncService(rclone.Cache.apiService, rclone.getSyncConfig, rclone.saveSyncConfig);
+              syncService.startSync(bookmark, sync.config)
+                  .then(() => refresh())
+                  .catch(error => {
+                      console.error('Sync error:', error);
+                      dialogs.rcloneAPIError('Sync failed: ' + error.message);
+                  });
+          }
+      });
 
         if (isActive) {
             template.submenu.push(

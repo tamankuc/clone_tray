@@ -23,7 +23,7 @@ class RcloneApiService {
             console.log(`Making API request: ${method} ${url}`, data || '{}');
 
             const response = await fetch(url, options);
-            
+            // console.log('API response:', response);
             if (!response.ok) {
                 const errorText = await response.text();
                 throw new Error(`HTTP error ${response.status}: ${errorText}`);
@@ -34,7 +34,7 @@ class RcloneApiService {
             if (responseData.error) {
                 throw new Error(responseData.error);
             }
-
+            // console.log('API response:', responseData);
             return responseData;
         } catch (error) {
             console.error(`API request failed for ${endpoint}:`, error.message);
