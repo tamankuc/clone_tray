@@ -1,5 +1,4 @@
 const fetch = require('node-fetch');
-const { AbortController } = require('node:abort-controller');
 
 class RcloneApiService {
     constructor(port = 5572, user = 'user', pass = 'pass') {
@@ -16,8 +15,8 @@ class RcloneApiService {
 
     async makeRequest(endpoint, method = 'POST', data = null) {
         const requestId = Math.random().toString(36).substring(7);
-        const controller = new AbortController();  // Теперь работает с импортом
-        
+        let timeoutId = null;
+
         try {
             console.log(`[${requestId}] Starting request to ${endpoint}`);
             const url = `${this.baseURL}/${endpoint}`;
@@ -32,8 +31,6 @@ class RcloneApiService {
                     'Content-Length': Buffer.byteLength(bodyStr)
                 },
                 body: bodyStr,
-                signal: controller.signal,
-                // Важные опции для node-fetch
                 timeout: this.timeout,
                 compress: false,     // Отключаем сжатие
                 follow: 0,           // Отключаем редиректы
@@ -47,47 +44,63 @@ class RcloneApiService {
                 bodyLength: Buffer.byteLength(bodyStr)
             });
 
-            // Устанавливаем таймер отмены
-            const timeoutId = setTimeout(() => {
-                controller.abort();
-            }, this.timeout);
+            // Создаем промис с таймаутом
+            const timeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error(`Request timeout after ${this.timeout}ms`));
+                }, this.timeout);
+            });
 
-            try {
-                const response = await fetch(url, options);
-
-                clearTimeout(timeoutId);  // Очищаем таймер при успешном ответе
-                
-                console.log(`[${requestId}] Response:`, {
-                    status: response.status,
-                    statusText: response.statusText
-                });
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`HTTP error ${response.status}: ${errorText}`);
-                }
-
-                const responseData = await response.json();
-                return responseData;
-
-            } catch (error) {
-                if (error.name === 'AbortError') {
-                    throw new Error(`Request timeout after ${this.timeout}ms`);
-                }
-                throw error;
-            } finally {
-                clearTimeout(timeoutId);  // На всякий случай очищаем и в finally
+            // Race между запросом и таймаутом
+            const response = await Promise.race([
+                fetch(url, options),
+                timeoutPromise
+            ]);
+            
+            // Сразу очищаем таймер
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
             }
+
+            console.log(`[${requestId}] Response:`, {
+                status: response.status,
+                statusText: response.statusText
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`HTTP error ${response.status}: ${errorText}`);
+            }
+
+            // Еще один таймаут для чтения тела ответа
+            const responsePromise = response.json();
+            const responseTimeoutPromise = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => {
+                    reject(new Error('Response parsing timeout'));
+                }, 5000); // 5 секунд на парсинг ответа
+            });
+
+            const responseData = await Promise.race([
+                responsePromise,
+                responseTimeoutPromise
+            ]);
+
+            return responseData;
 
         } catch (error) {
             console.error(`[${requestId}] Request failed:`, {
                 endpoint,
                 message: error.message,
-                name: error.name,
                 code: error.code,
                 stack: error.stack
             });
             throw error;
+        } finally {
+            // На всякий случай очищаем таймер
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
         }
     }
 
@@ -135,13 +148,13 @@ class RcloneApiService {
     }
 
     async createMount(params) {
+        console.log('Creating mount with params:', params);
         const mountParams = {
             fs: params.fs,
             mountPoint: params.mountPoint,
             opt: params.mountOpt
         };
 
-        console.log('Mount request params:', mountParams);
         return this.makeRequest('mount/mount', 'POST', mountParams);
     }
 
