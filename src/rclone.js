@@ -424,12 +424,11 @@ const startRcloneAPI = async function() {
               '--rc-user=user',
               '--rc-pass=pass',
               '--rc-allow-origin=*',
-              '--no-check-certificate'
+              '--no-check-certificate',
+              '--log-level=DEBUG',
+              '--log-file=' + path.join('./rclone.log')
           ];
 
-          if (isDev) {
-              command.push('--verbose');
-          }
 
           console.log('Запуск Rclone API с командой:', rcloneBinary, command.join(' '));
 
