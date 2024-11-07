@@ -426,7 +426,8 @@ const startRcloneAPI = async function() {
               '--rc-allow-origin=*',
               '--no-check-certificate',
               '--log-level=DEBUG',
-              '--log-file=' + path.join('./rclone.log')
+              '--log-file=' + path.join('./rclone.log'),
+              '--rc-no-timeout'
           ];
 
 
