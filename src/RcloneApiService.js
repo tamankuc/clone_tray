@@ -7,14 +7,27 @@ class RcloneApiService {
         this.headers = {
             'Content-Type': 'application/json',
             'Authorization': `Basic ${this.auth}`,
-            'Origin': 'http://localhost'
+            'Origin': 'http://localhost',
+            'Connection': 'keep-alive'
         };
+        this.timeout = 10000; // 10 секунд максимум на запрос
+        this.pendingRequests = new Map(); // Для отслеживания зависших запросов
     }
+
+    clearRequest(id) {
+        if (this.pendingRequests.has(id)) {
+            clearTimeout(this.pendingRequests.get(id));
+            this.pendingRequests.delete(id);
+        }
+    }
+
     async makeRequest(endpoint, method = 'POST', data = null) {
+        const requestId = Math.random().toString(36).substring(7);
+
         try {
+            console.log(`Starting request ${requestId} to ${endpoint}`);
             const url = `${this.baseURL}/${endpoint}`;
             
-            // Всегда отправляем хотя бы пустой объект в виде JSON
             const bodyData = data || {};
             const bodyStr = JSON.stringify(bodyData);
             
@@ -24,18 +37,41 @@ class RcloneApiService {
                     ...this.headers,
                     'Content-Length': Buffer.byteLength(bodyStr)
                 },
-                body: bodyStr  // Всегда отправляем тело, даже если это '{}'
+                body: bodyStr,
+                timeout: this.timeout // Используем встроенный таймаут node-fetch
             };
 
-            console.log('Final request options:', {
+            console.log('Request details:', {
                 url,
                 method,
                 headers: options.headers,
                 body: bodyStr
             });
 
-            const response = await fetch(url, options);
-            
+            // Создаем промис с таймаутом
+            const timeoutPromise = new Promise((_, reject) => {
+                const timer = setTimeout(() => {
+                    this.clearRequest(requestId);
+                    reject(new Error(`Request ${requestId} timed out after ${this.timeout}ms`));
+                }, this.timeout);
+                
+                this.pendingRequests.set(requestId, timer);
+            });
+
+            // Race между запросом и таймаутом
+            const response = await Promise.race([
+                fetch(url, options),
+                timeoutPromise
+            ]);
+
+            // Очищаем таймер после получения ответа
+            this.clearRequest(requestId);
+
+            console.log(`Got response for ${requestId}:`, {
+                status: response.status,
+                statusText: response.statusText
+            });
+
             if (!response.ok) {
                 const errorText = await response.text();
                 throw new Error(`HTTP error ${response.status}: ${errorText}`);
@@ -45,14 +81,18 @@ class RcloneApiService {
             return responseData;
 
         } catch (error) {
-            console.error(`API request failed for ${endpoint}:`, {
+            console.error(`Request ${requestId} failed:`, {
+                endpoint,
                 message: error.message,
                 cause: error.cause,
                 stack: error.stack
             });
             throw error;
+        } finally {
+            this.clearRequest(requestId);
         }
     }
+
     async checkConnection() {
         try {
             const result = await this.makeRequest('config/listremotes');
@@ -96,18 +136,11 @@ class RcloneApiService {
         return this.makeRequest('core/bwlimit', 'POST', { rate });
     }
 
-    // async createMount(fs, mountPoint) {
-    //     return this.makeRequest('mount/mount', 'POST', {
-    //         fs: fs,
-    //         mountPoint: mountPoint
-    //     });
-    // }
     async createMount(params) {
-        // API ожидает параметры на верхнем уровне, а не вложенными в fs
         const mountParams = {
             fs: params.fs,
             mountPoint: params.mountPoint,
-            opt: params.mountOpt  // Переименовываем mountOpt в opt как ожидает API
+            opt: params.mountOpt
         };
 
         console.log('Mount request params:', mountParams);
@@ -126,18 +159,38 @@ class RcloneApiService {
         return this.makeRequest('mount/unmountall', 'POST');
     }
 
-    async unmount(mountPoint) {
-        return this.makeRequest('mount/unmount', 'POST', {
-            mountPoint: mountPoint
-        });
+    // Метод для быстрой проверки сервера
+    async pingServer() {
+        const originalTimeout = this.timeout;
+        try {
+            this.timeout = 2000; // Сокращаем таймаут для пинга
+            const result = await this.makeRequest('core/version', 'POST', {});
+            return true;
+        } catch (error) {
+            console.error('Server ping failed:', error.message);
+            return false;
+        } finally {
+            this.timeout = originalTimeout;
+        }
     }
 
-    async listMounts() {
-        return this.makeRequest('mount/listmounts', 'POST');
+    // Получить количество зависших запросов
+    getPendingRequestsCount() {
+        return this.pendingRequests.size;
     }
 
-    async unmountAll() {
-        return this.makeRequest('mount/unmountall', 'POST');
+    // Метод для периодической проверки и очистки зависших запросов
+    startHangingRequestsMonitor(interval = 30000) {
+        setInterval(() => {
+            const hangingCount = this.getPendingRequestsCount();
+            if (hangingCount > 0) {
+                console.warn(`Found ${hangingCount} hanging requests, cleaning up...`);
+                for (const [id, timer] of this.pendingRequests.entries()) {
+                    clearTimeout(timer);
+                    this.pendingRequests.delete(id);
+                }
+            }
+        }, interval);
     }
 }
 
