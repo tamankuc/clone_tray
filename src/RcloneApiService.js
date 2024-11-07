@@ -1,4 +1,5 @@
 const fetch = require('node-fetch');
+const { AbortController } = require('node:abort-controller');
 
 class RcloneApiService {
     constructor(port = 5572, user = 'user', pass = 'pass') {
@@ -15,8 +16,8 @@ class RcloneApiService {
 
     async makeRequest(endpoint, method = 'POST', data = null) {
         const requestId = Math.random().toString(36).substring(7);
-        let timeoutId = null;
-
+        const controller = new AbortController();  // Теперь работает с импортом
+        
         try {
             console.log(`[${requestId}] Starting request to ${endpoint}`);
             const url = `${this.baseURL}/${endpoint}`;
@@ -31,6 +32,7 @@ class RcloneApiService {
                     'Content-Length': Buffer.byteLength(bodyStr)
                 },
                 body: bodyStr,
+                signal: controller.signal,
                 // Важные опции для node-fetch
                 timeout: this.timeout,
                 compress: false,     // Отключаем сжатие
@@ -45,45 +47,47 @@ class RcloneApiService {
                 bodyLength: Buffer.byteLength(bodyStr)
             });
 
-            // Создаем промис с таймаутом
-            const fetchPromise = fetch(url, options);
-            const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => {
-                    reject(new Error(`Request timeout after ${this.timeout}ms`));
-                }, this.timeout);
-            });
+            // Устанавливаем таймер отмены
+            const timeoutId = setTimeout(() => {
+                controller.abort();
+            }, this.timeout);
 
-            // Race между запросом и таймаутом
-            const response = await Promise.race([fetchPromise, timeoutPromise]);
-            
-            // Сразу очищаем таймер
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-                timeoutId = null;
+            try {
+                const response = await fetch(url, options);
+
+                clearTimeout(timeoutId);  // Очищаем таймер при успешном ответе
+                
+                console.log(`[${requestId}] Response:`, {
+                    status: response.status,
+                    statusText: response.statusText
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP error ${response.status}: ${errorText}`);
+                }
+
+                const responseData = await response.json();
+                return responseData;
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    throw new Error(`Request timeout after ${this.timeout}ms`);
+                }
+                throw error;
+            } finally {
+                clearTimeout(timeoutId);  // На всякий случай очищаем и в finally
             }
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP error ${response.status}: ${errorText}`);
-            }
-
-            // Сразу читаем ответ и закрываем соединение
-            const responseData = await response.json();
-            
-            return responseData;
 
         } catch (error) {
             console.error(`[${requestId}] Request failed:`, {
                 endpoint,
                 message: error.message,
+                name: error.name,
+                code: error.code,
                 stack: error.stack
             });
             throw error;
-        } finally {
-            // На всякий случай очищаем таймер
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-            }
         }
     }
 
