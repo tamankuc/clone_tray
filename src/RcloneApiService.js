@@ -14,32 +14,24 @@ class RcloneApiService {
         try {
             const url = `${this.baseURL}/${endpoint}`;
             
-            // Важно! Не отправляем body для пустых данных
+            // Всегда отправляем хотя бы пустой объект в виде JSON
+            const bodyData = data || {};
+            const bodyStr = JSON.stringify(bodyData);
+            
             const options = {
                 method,
-                headers: this.headers
+                headers: {
+                    ...this.headers,
+                    'Content-Length': Buffer.byteLength(bodyStr)
+                },
+                body: bodyStr  // Всегда отправляем тело, даже если это '{}'
             };
-
-            if (data !== null) {
-                const bodyStr = JSON.stringify(data);
-                options.body = bodyStr;
-                console.log('Request body (string):', bodyStr);
-                console.log('Request body length:', bodyStr.length);
-                console.log('Request body buffer:', Buffer.from(bodyStr));
-                
-                // Добавляем Content-Length только если есть тело
-                options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
-            } else {
-                console.log('Empty request - no body sent');
-                // Для пустых POST можно явно указать длину 0
-                options.headers['Content-Length'] = '0';
-            }
 
             console.log('Final request options:', {
                 url,
                 method,
                 headers: options.headers,
-                bodyPresent: !!options.body
+                body: bodyStr
             });
 
             const response = await fetch(url, options);
