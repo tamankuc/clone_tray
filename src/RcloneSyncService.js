@@ -2,257 +2,349 @@ const fs = require('fs');
 
 class RcloneSyncService {
     constructor(apiService, getSyncConfig, saveSyncConfig) {
-        if (!apiService) {
-            throw new Error('apiService required for RcloneSyncService');
-        }
-        if (!getSyncConfig) {
-            throw new Error('getSyncConfig required for RcloneSyncService');
-        }
-        if (!saveSyncConfig) {
-            throw new Error('saveSyncConfig required for RcloneSyncService');
-        }
+        if (!apiService) throw new Error('apiService is required for RcloneSyncService');
+        if (!getSyncConfig) throw new Error('getSyncConfig is required for RcloneSyncService');
+        if (!saveSyncConfig) throw new Error('saveSyncConfig is required for RcloneSyncService');
 
         this.apiService = apiService;
         this.getSyncConfig = getSyncConfig;
         this.saveSyncConfig = saveSyncConfig;
         this.activeSyncs = new Map();
         this.healthCheckInterval = 30000;
-        this.lastHealthCheck = Date.now();
-        
-        // Запускаем проверку здоровья
-        setInterval(() => this.performHealthCheck(), this.healthCheckInterval);
+        this.jobTimeout = 3600000; // 1 hour timeout for jobs
+        this._startHealthCheck();
     }
 
-    async performHealthCheck() {
-        const now = Date.now();
-        
-        // Проверяем каждую активную синхронизацию
-        for (const [syncKey, syncInfo] of this.activeSyncs.entries()) {
-            try {
-                // Если с последней проверки прошло меньше интервала - пропускаем
-                if (now - syncInfo.lastCheck < this.healthCheckInterval) {
-                    continue;
-                }
+    async _makeJobRequest(endpoint, params = {}, timeout = null) {
+        const requestId = Math.random().toString(36).substring(7);
+        console.log(`[${requestId}] Starting job request to ${endpoint}`, params);
 
-                console.log(`Checking health for sync: ${syncKey}`);
-                
-                const timeoutPromise = new Promise((_, reject) => {
-                    setTimeout(() => reject(new Error('Status check timeout')), 5000);
-                });
-                
-                // Race между запросом статуса и таймаутом
-                const status = await Promise.race([
-                    this.apiService.makeRequest('job/status', 'POST', { jobid: syncInfo.jobId }),
-                    timeoutPromise
-                ]);
-
-                syncInfo.lastCheck = now;
-
-                if (status.finished) {
-                    console.log(`Sync ${syncKey} finished with status:`, status);
-                    
-                    if (status.error) {
-                        console.error(`Sync error for ${syncKey}:`, status.error);
-                        this.activeSyncs.delete(syncKey);
-                        continue;
-                    }
-
-                    // Для bisync запускаем новую сессию
-                    if (syncInfo.config.mode === 'bisync') {
-                        const [bookmarkName, configName] = syncKey.split('_');
-                        console.log(`Restarting bisync for ${bookmarkName}:${configName}`);
-                        
-                        const bookmark = { $name: bookmarkName };
-                        this.activeSyncs.delete(syncKey);
-                        await this.startSync(bookmark, syncInfo.config);
-                    } else {
-                        this.activeSyncs.delete(syncKey);
-                    }
-                }
-            } catch (error) {
-                console.error(`Health check error for ${syncKey}:`, error);
-                
-                // Если ошибка говорит о том что задача не найдена - удаляем из активных
-                if (error.message && error.message.includes('job not found')) {
-                    console.log(`Removing lost sync ${syncKey}`);
-                    this.activeSyncs.delete(syncKey);
-                }
-            }
-        }
-    }
-
-    async _runBisync(remotePath, localPath, useResync = false) {
         try {
-            console.log('Starting bisync between', remotePath, 'and', localPath, 
-                      useResync ? 'with resync' : 'in normal mode');
-            
-            const baseArgs = [
-                remotePath, 
-                localPath,
-                '--force',
-                '--create-empty-src-dirs',
-                '--resilient',
-                '--ignore-case',
-                '--conflict-resolve', 'newer',
-                '--compare', 'modtime,size',
-                '--modify-window', '2s',
-                '--timeout', '30s',
-                '--transfers', '1',
-                '--ignore-listing-checksum',
-                '-v'
-            ];
-
-            if (useResync) {
-                baseArgs.push('--resync');
-                baseArgs.push('--resync-mode', 'newer');
-            }
-
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Bisync command timeout')), 30000);
+            const response = await this.apiService.makeRequest(endpoint, 'POST', {
+                ...params,
+                _async: true
             });
 
-            const response = await Promise.race([
-                this.apiService.makeRequest('core/command', 'POST', {
-                    command: 'bisync',
-                    arg: baseArgs,
-                    _async: true
-                }),
-                timeoutPromise
-            ]);
-
             if (!response || !response.jobid) {
-                throw new Error('Failed to get job ID for bisync');
+                throw new Error('Failed to get job ID from response');
             }
 
-            console.log('Bisync started with ID:', response.jobid);
+            console.log(`[${requestId}] Job started with ID: ${response.jobid}`);
             return response.jobid;
-            
         } catch (error) {
-            console.error('Bisync start error:', error);
+            console.error(`[${requestId}] Job request failed:`, error);
             throw error;
         }
     }
 
-    async startSync(bookmark, config) {
-        try {
-            if (!config || !config.localPath || !config.remotePath) {
-                throw new Error('Invalid sync configuration');
+    async _waitForJob(jobId, timeout = this.jobTimeout) {
+        const startTime = Date.now();
+        const requestId = Math.random().toString(36).substring(7);
+
+        while (true) {
+            if (Date.now() - startTime > timeout) {
+                throw new Error(`Job timeout exceeded after ${timeout}ms`);
             }
 
-            const syncKey = `${bookmark.$name}_${config.name}`;
-            console.log('Starting sync:', syncKey);
-            
-            // Проверяем существующую синхронизацию
-            if (this.activeSyncs.has(syncKey)) {
-                try {
-                    const status = await this.apiService.makeRequest('job/status', 'POST', {
-                        jobid: this.activeSyncs.get(syncKey).jobId
-                    });
-                    
-                    if (!status.finished) {
-                        console.log('Sync already active:', syncKey);
-                        return false;
-                    }
-                } catch (error) {
-                    // Игнорируем ошибку, просто удалим старую синхронизацию
+            try {
+                const status = await this.apiService.makeRequest('job/status', 'POST', { jobid: jobId });
+                
+                if (status.finished) {
+                    console.log(`[${requestId}] Job ${jobId} finished:`, status);
+                    if (status.error) throw new Error(status.error);
+                    return status;
                 }
+            } catch (error) {
+                if (error.message && error.message.includes('job not found')) {
+                    console.log(`[${requestId}] Job ${jobId} not found, assuming completed`);
+                    return null;
+                }
+                throw error;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+    }
+
+    async _runBisync(remotePath, localPath, useResync = false) {
+        const requestId = Math.random().toString(36).substring(7);
+        console.log(`[${requestId}] Starting bisync:`, { remotePath, localPath, useResync });
+
+        const baseArgs = [
+            remotePath,
+            localPath,
+            '--force',
+            '--create-empty-src-dirs',
+            '--resilient',
+            '--ignore-case',
+            '--conflict-resolve', 'newer',
+            '--compare', 'modtime,size',
+            '--modify-window', '2s',
+            '--timeout', '30s',
+            '--transfers', '1',
+            '--ignore-listing-checksum',
+            '-v'
+        ];
+
+        if (useResync) {
+            baseArgs.push('--resync', '--resync-mode', 'newer');
+        }
+
+        try {
+            const jobId = await this._makeJobRequest('core/command', {
+                command: 'bisync',
+                arg: baseArgs
+            });
+
+            return jobId;
+        } catch (error) {
+            console.error(`[${requestId}] Bisync failed:`, error);
+            throw error;
+        }
+    }
+
+    async _initialSync(remotePath, localPath) {
+        const requestId = Math.random().toString(36).substring(7);
+        console.log(`[${requestId}] Starting initial sync:`, { remotePath, localPath });
+
+        try {
+            const jobId = await this._makeJobRequest('core/command', {
+                command: 'sync',
+                arg: [
+                    remotePath,
+                    localPath,
+                    '--create-empty-src-dirs',
+                    '--inplace',
+                    '--verbose',
+                    '--track-renames',
+                    '--ignore-existing',
+                    '--modify-window', '2s',
+                    '--timeout', '30s',
+                    '--transfers', '1'
+                ]
+            });
+
+            await this._waitForJob(jobId);
+            console.log(`[${requestId}] Initial sync completed`);
+        } catch (error) {
+            console.error(`[${requestId}] Initial sync failed:`, error);
+            throw error;
+        }
+    }
+
+    _formatRemotePath(bookmark, path) {
+        return `${bookmark.$name}:${path}`;
+    }
+
+    _getSyncKey(bookmark, configName) {
+        return `${bookmark.$name}_${configName}`;
+    }
+
+    _startHealthCheck() {
+        setInterval(async () => {
+            const checkId = Math.random().toString(36).substring(7);
+            console.log(`[${checkId}] Starting health check for ${this.activeSyncs.size} syncs`);
+
+            for (const [syncKey, syncInfo] of this.activeSyncs) {
+                try {
+                    await this._checkSyncHealth(syncKey, syncInfo, checkId);
+                } catch (error) {
+                    console.error(`[${checkId}] Health check failed for ${syncKey}:`, error);
+                }
+            }
+        }, this.healthCheckInterval);
+    }
+
+    async _checkSyncHealth(syncKey, syncInfo, checkId) {
+        try {
+            const status = await this.apiService.makeRequest('job/status', 'POST', {
+                jobid: syncInfo.jobId
+            });
+
+            if (status.finished) {
+                console.log(`[${checkId}] Bisync finished for ${syncKey}:`, status);
+
+                if (status.error) {
+                    console.error(`[${checkId}] Bisync error:`, status.error);
+                    this.activeSyncs.delete(syncKey);
+                    return;
+                }
+
+                const now = Date.now();
+                if (now - syncInfo.lastRunTime >= this.healthCheckInterval) {
+                    const [bookmarkName, configName] = syncKey.split('_');
+                    const bookmark = { $name: bookmarkName };
+
+                    this.activeSyncs.delete(syncKey);
+                    await this.startSync(bookmark, syncInfo.config);
+                }
+            }
+        } catch (error) {
+            if (error.message && error.message.includes('job not found')) {
+                console.log(`[${checkId}] Job not found, removing from active syncs:`, syncKey);
                 this.activeSyncs.delete(syncKey);
-            }
-
-            const localPath = config.localPath;
-            const remotePath = `${bookmark.$name}:${config.remotePath}`;
-
-            let bisyncJobId;
-            const initialized = this._checkInitialized(bookmark, config);
-
-            if (!initialized) {
-                console.log('First run, initializing sync');
-                await this._initialSync(remotePath, localPath);
-                bisyncJobId = await this._runBisync(remotePath, localPath, true);
-                await this._waitForJob(bisyncJobId);
-                await this._saveInitializationStatus(bookmark, config);
-                bisyncJobId = await this._runBisync(remotePath, localPath, false);
             } else {
-                console.log('Starting normal bisync');
-                bisyncJobId = await this._runBisync(remotePath, localPath, false);
+                console.error(`[${checkId}] Health check error:`, error);
             }
-            
-            // Сохраняем информацию о синхронизации
+        }
+    }
+
+    async startSync(bookmark, config) {
+        if (!config || !config.localPath || !config.remotePath) {
+            throw new Error('Invalid sync configuration');
+        }
+
+        const requestId = Math.random().toString(36).substring(7);
+        const syncKey = this._getSyncKey(bookmark, config.name);
+        
+        console.log(`[${requestId}] Starting sync:`, { syncKey, config });
+
+        if (this.activeSyncs.has(syncKey)) {
+            try {
+                const status = await this.apiService.makeRequest('job/status', 'POST', {
+                    jobid: this.activeSyncs.get(syncKey).jobId
+                });
+
+                if (!status.finished) {
+                    console.log(`[${requestId}] Sync already active:`, syncKey);
+                    return false;
+                }
+            } catch (error) {
+                console.log(`[${requestId}] Error checking existing sync:`, error);
+            }
+            this.activeSyncs.delete(syncKey);
+        }
+
+        try {
+            const localPath = config.localPath;
+            const remotePath = this._formatRemotePath(bookmark, config.remotePath);
+            let jobId;
+
+            const syncConfig = this.getSyncConfig(bookmark, config.name);
+            const isInitialized = syncConfig && syncConfig._rclonetray_sync_initialized === 'true';
+
+            if (!isInitialized) {
+                console.log(`[${requestId}] First run, initializing`);
+                await this._initialSync(remotePath, localPath);
+                jobId = await this._runBisync(remotePath, localPath, true);
+                await this._waitForJob(jobId);
+                await this._saveInitializationStatus(bookmark, config);
+                jobId = await this._runBisync(remotePath, localPath, false);
+            } else {
+                console.log(`[${requestId}] Directory already initialized, starting bisync`);
+                jobId = await this._runBisync(remotePath, localPath, false);
+            }
+
             this.activeSyncs.set(syncKey, {
-                jobId: bisyncJobId,
-                config: config,
+                jobId,
+                config,
                 startTime: Date.now(),
-                lastCheck: Date.now()
+                lastRunTime: Date.now()
             });
 
             return true;
-
         } catch (error) {
-            console.error('Sync start error:', error);
+            console.error(`[${requestId}] Sync start failed:`, error);
             throw error;
         }
     }
 
     async stopSync(bookmark, syncName) {
-        const syncKey = `${bookmark.$name}_${syncName}`;
-        const syncInfo = this.activeSyncs.get(syncKey);
+        const requestId = Math.random().toString(36).substring(7);
+        const syncKey = this._getSyncKey(bookmark, syncName);
         
+        console.log(`[${requestId}] Stopping sync:`, syncKey);
+
+        const syncInfo = this.activeSyncs.get(syncKey);
         if (!syncInfo) {
-            console.log('Sync not found:', syncKey);
+            console.log(`[${requestId}] Sync not found:`, syncKey);
             return false;
         }
 
         try {
-            const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Stop sync timeout')), 5000);
+            await this.apiService.makeRequest('job/stop', 'POST', {
+                jobid: syncInfo.jobId
             });
 
-            await Promise.race([
-                this.apiService.makeRequest('job/stop', 'POST', {
-                    jobid: syncInfo.jobId
-                }),
-                timeoutPromise
-            ]);
-            
             this.activeSyncs.delete(syncKey);
+            console.log(`[${requestId}] Sync stopped:`, syncKey);
             return true;
         } catch (error) {
             if (error.message && error.message.includes('job not found')) {
                 this.activeSyncs.delete(syncKey);
                 return true;
             }
-            console.error('Stop sync error:', error);
+            console.error(`[${requestId}] Stop sync failed:`, error);
+            throw error;
+        }
+    }
+
+    async _saveInitializationStatus(bookmark, config) {
+        try {
+            const existingConfig = this.getSyncConfig(bookmark, config.name);
+            
+            const updatedConfig = {
+                ...existingConfig,
+                enabled: existingConfig ? existingConfig.enabled : false,
+                localPath: config.localPath,
+                remotePath: config.remotePath,
+                mode: 'bisync',
+                _rclonetray_sync_initialized: 'true',
+                name: config.name
+            };
+
+            await this.saveSyncConfig(bookmark, updatedConfig, config.name);
+            console.log('Initialization status saved for', bookmark.$name, config.name);
+        } catch (error) {
+            console.error('Error saving initialization status:', error);
             throw error;
         }
     }
 
     async cleanup() {
-        const stopPromises = [];
-        
-        for (const [syncKey, syncInfo] of this.activeSyncs.entries()) {
-            const [bookmarkName, syncName] = syncKey.split('_');
-            stopPromises.push(
-                this.stopSync({ $name: bookmarkName }, syncName)
-                    .catch(error => {
-                        console.error('Cleanup error for sync:', syncKey, error);
-                    })
-            );
+        const requestId = Math.random().toString(36).substring(7);
+        console.log(`[${requestId}] Starting cleanup for ${this.activeSyncs.size} syncs`);
+
+        const cleanupPromises = [];
+
+        for (const [syncKey, syncInfo] of this.activeSyncs) {
+            try {
+                const [bookmarkName, syncName] = syncKey.split('_');
+                cleanupPromises.push(
+                    this.stopSync({ $name: bookmarkName }, syncName)
+                        .catch(error => {
+                            console.error(`[${requestId}] Cleanup failed for ${syncKey}:`, error);
+                        })
+                );
+            } catch (error) {
+                console.error(`[${requestId}] Error preparing cleanup for ${syncKey}:`, error);
+            }
         }
 
-        await Promise.allSettled(stopPromises);
-        this.activeSyncs.clear();
+        try {
+            await Promise.allSettled(cleanupPromises);
+            this.activeSyncs.clear();
+            console.log(`[${requestId}] All sync resources cleaned up`);
+        } catch (error) {
+            console.error(`[${requestId}] Final cleanup failed:`, error);
+            throw error;
+        }
     }
 
     getSyncStatus(bookmark, syncName) {
-        const syncKey = `${bookmark.$name}_${syncName}`;
+        const syncKey = this._getSyncKey(bookmark, syncName);
         const syncInfo = this.activeSyncs.get(syncKey);
         
-        return syncInfo ? {
+        if (!syncInfo) {
+            return {
+                status: 'idle'
+            };
+        }
+
+        return {
             status: 'active',
             startTime: syncInfo.startTime,
             config: syncInfo.config
-        } : { 
-            status: 'idle' 
         };
     }
 }
