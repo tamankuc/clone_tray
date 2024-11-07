@@ -6,7 +6,8 @@ class RcloneApiService {
         this.auth = Buffer.from(`${user}:${pass}`).toString('base64');
         this.headers = {
             'Content-Type': 'application/json',
-            'Authorization': `Basic ${this.auth}`
+            'Authorization': `Basic ${this.auth}`,
+            'Origin': 'http://localhost'
         };
     }
 
