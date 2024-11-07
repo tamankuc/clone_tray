@@ -8,24 +8,17 @@ class RcloneApiService {
             'Content-Type': 'application/json',
             'Authorization': `Basic ${this.auth}`,
             'Origin': 'http://localhost',
-            'Connection': 'keep-alive'
+            'Connection': 'close'  // Важно: не держим соединение открытым
         };
-        this.timeout = 10000; // 10 секунд максимум на запрос
-        this.pendingRequests = new Map(); // Для отслеживания зависших запросов
-    }
-
-    clearRequest(id) {
-        if (this.pendingRequests.has(id)) {
-            clearTimeout(this.pendingRequests.get(id));
-            this.pendingRequests.delete(id);
-        }
+        this.timeout = 10000;
     }
 
     async makeRequest(endpoint, method = 'POST', data = null) {
         const requestId = Math.random().toString(36).substring(7);
+        let timeoutId = null;
 
         try {
-            console.log(`Starting request ${requestId} to ${endpoint}`);
+            console.log(`[${requestId}] Starting request to ${endpoint}`);
             const url = `${this.baseURL}/${endpoint}`;
             
             const bodyData = data || {};
@@ -38,58 +31,59 @@ class RcloneApiService {
                     'Content-Length': Buffer.byteLength(bodyStr)
                 },
                 body: bodyStr,
-                timeout: this.timeout // Используем встроенный таймаут node-fetch
+                // Важные опции для node-fetch
+                timeout: this.timeout,
+                compress: false,     // Отключаем сжатие
+                follow: 0,           // Отключаем редиректы
+                size: 0,             // Отключаем лимит размера ответа
             };
 
-            console.log('Request details:', {
+            console.log(`[${requestId}] Request details:`, {
                 url,
                 method,
                 headers: options.headers,
-                body: bodyStr
+                bodyLength: Buffer.byteLength(bodyStr)
             });
 
             // Создаем промис с таймаутом
+            const fetchPromise = fetch(url, options);
             const timeoutPromise = new Promise((_, reject) => {
-                const timer = setTimeout(() => {
-                    this.clearRequest(requestId);
-                    reject(new Error(`Request ${requestId} timed out after ${this.timeout}ms`));
+                timeoutId = setTimeout(() => {
+                    reject(new Error(`Request timeout after ${this.timeout}ms`));
                 }, this.timeout);
-                
-                this.pendingRequests.set(requestId, timer);
             });
 
             // Race между запросом и таймаутом
-            const response = await Promise.race([
-                fetch(url, options),
-                timeoutPromise
-            ]);
-
-            // Очищаем таймер после получения ответа
-            this.clearRequest(requestId);
-
-            console.log(`Got response for ${requestId}:`, {
-                status: response.status,
-                statusText: response.statusText
-            });
+            const response = await Promise.race([fetchPromise, timeoutPromise]);
+            
+            // Сразу очищаем таймер
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+            }
 
             if (!response.ok) {
                 const errorText = await response.text();
                 throw new Error(`HTTP error ${response.status}: ${errorText}`);
             }
 
+            // Сразу читаем ответ и закрываем соединение
             const responseData = await response.json();
+            
             return responseData;
 
         } catch (error) {
-            console.error(`Request ${requestId} failed:`, {
+            console.error(`[${requestId}] Request failed:`, {
                 endpoint,
                 message: error.message,
-                cause: error.cause,
                 stack: error.stack
             });
             throw error;
         } finally {
-            this.clearRequest(requestId);
+            // На всякий случай очищаем таймер
+            if (timeoutId) {
+                clearTimeout(timeoutId);
+            }
         }
     }
 
@@ -163,7 +157,7 @@ class RcloneApiService {
     async pingServer() {
         const originalTimeout = this.timeout;
         try {
-            this.timeout = 2000; // Сокращаем таймаут для пинга
+            this.timeout = 2000;
             const result = await this.makeRequest('core/version', 'POST', {});
             return true;
         } catch (error) {
@@ -172,25 +166,6 @@ class RcloneApiService {
         } finally {
             this.timeout = originalTimeout;
         }
-    }
-
-    // Получить количество зависших запросов
-    getPendingRequestsCount() {
-        return this.pendingRequests.size;
-    }
-
-    // Метод для периодической проверки и очистки зависших запросов
-    startHangingRequestsMonitor(interval = 30000) {
-        setInterval(() => {
-            const hangingCount = this.getPendingRequestsCount();
-            if (hangingCount > 0) {
-                console.warn(`Found ${hangingCount} hanging requests, cleaning up...`);
-                for (const [id, timer] of this.pendingRequests.entries()) {
-                    clearTimeout(timer);
-                    this.pendingRequests.delete(id);
-                }
-            }
-        }, interval);
     }
 }
 
