@@ -10,39 +10,57 @@ class RcloneApiService {
             'Origin': 'http://localhost'
         };
     }
-
     async makeRequest(endpoint, method = 'POST', data = null) {
         try {
             const url = `${this.baseURL}/${endpoint}`;
+            
+            // Важно! Не отправляем body для пустых данных
             const options = {
                 method,
-                headers: this.headers,
-                body: JSON.stringify(data || {}),
-                timeout: 5000
+                headers: this.headers
             };
 
-            console.log(`Making API request: ${method} ${url}`, data || '{}');
+            if (data !== null) {
+                const bodyStr = JSON.stringify(data);
+                options.body = bodyStr;
+                console.log('Request body (string):', bodyStr);
+                console.log('Request body length:', bodyStr.length);
+                console.log('Request body buffer:', Buffer.from(bodyStr));
+                
+                // Добавляем Content-Length только если есть тело
+                options.headers['Content-Length'] = Buffer.byteLength(bodyStr);
+            } else {
+                console.log('Empty request - no body sent');
+                // Для пустых POST можно явно указать длину 0
+                options.headers['Content-Length'] = '0';
+            }
+
+            console.log('Final request options:', {
+                url,
+                method,
+                headers: options.headers,
+                bodyPresent: !!options.body
+            });
 
             const response = await fetch(url, options);
-            // console.log('API response:', response);
+            
             if (!response.ok) {
                 const errorText = await response.text();
                 throw new Error(`HTTP error ${response.status}: ${errorText}`);
             }
 
             const responseData = await response.json();
-
-            if (responseData.error) {
-                throw new Error(responseData.error);
-            }
-            // console.log('API response:', responseData);
             return responseData;
+
         } catch (error) {
-            console.error(`API request failed for ${endpoint}:`, error.message);
+            console.error(`API request failed for ${endpoint}:`, {
+                message: error.message,
+                cause: error.cause,
+                stack: error.stack
+            });
             throw error;
         }
     }
-
     async checkConnection() {
         try {
             const result = await this.makeRequest('config/listremotes');
