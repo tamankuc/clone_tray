@@ -952,51 +952,117 @@ const mount = async function(bookmark, mountName = 'default') {
       const mountPoint = getMountPath(bookmark, mountName);
       const cacheKey = getMountCacheKey(bookmark.$name, mountName);
       
+      // 1. Проверяем и очищаем предыдущее состояние
       if (Cache.mountPoints[cacheKey]) {
-          console.log('Already mounted:', bookmark.$name, mountName);
-          return true;
+          try {
+              // Пытаемся размонтировать если точка осталась в кеше
+              await Cache.apiService.unmount(Cache.mountPoints[cacheKey].path);
+          } catch (err) {
+              console.log('Cleanup previous mount state error:', err);
+              // Игнорируем ошибку, просто логируем
+          }
+          delete Cache.mountPoints[cacheKey];
       }
 
-      if (!fs.existsSync(mountPoint)) {
-          fs.mkdirSync(mountPoint, { recursive: true });
+      // 2. Проверяем существование директории
+      try {
+          await fs.promises.access(mountPoint);
+      } catch (err) {
+          // Директория не существует - создаем
+          await fs.promises.mkdir(mountPoint, { recursive: true });
       }
 
-      // Формируем имя remote с учетом пути
+      // 3. Проверяем, что директория пуста
+      const files = await fs.promises.readdir(mountPoint);
+      if (files.length > 0) {
+          console.warn('Mount point not empty:', mountPoint);
+          // Можно добавить очистку, если нужно
+      }
+
+      // 4. Формируем remote path
       const remoteName = bookmark.$name + ':';
       const remotePath = config.remotePath ? 
           path.posix.join(remoteName, config.remotePath) : 
           remoteName;
 
-      console.log('Mounting', remotePath, 'to', mountPoint, 'with options:', config.options);
-
+      // 5. Готовим параметры монтирования
       const mountParams = {
           fs: remotePath,
           mountPoint: mountPoint,
-          mountOpt: config.options
+          mountOpt: {
+              ...config.options,
+              '--daemon': false,    // Важно: запускаем в foreground
+              '--allow-other': true // Разрешаем доступ другим пользователям
+          }
       };
 
-      await Cache.apiService.createMount(mountParams);
-      
-      Cache.mountPoints[cacheKey] = {
-          path: mountPoint,
-          remote: remotePath,
-          options: config.options
-      };
+      console.log('Mounting with params:', JSON.stringify(mountParams, null, 2));
 
-      config.enabled = true;
-      saveMountConfig(bookmark, config, mountName);
+      // 6. Делаем несколько попыток монтирования
+      let retries = 3;
+      let lastError = null;
 
-      // Обновляем UI
-      UpdateCallbacksRegistry.forEach(callback => callback());
+      while (retries > 0) {
+          try {
+              // Пауза между попытками
+              if (retries < 3) {
+                  await new Promise(resolve => setTimeout(resolve, 1000));
+              }
 
-      return true;
+              await Cache.apiService.createMount(mountParams);
+              
+              // Проверяем успешность монтирования
+              const mountCheck = await new Promise((resolve) => {
+                  setTimeout(async () => {
+                      try {
+                          await fs.promises.access(mountPoint);
+                          // Дополнительная проверка через listMounts
+                          const mounts = await Cache.apiService.listMounts();
+                          const isMounted = Object.values(mounts.mountPoints || {})
+                              .some(m => m.MountPoint === mountPoint);
+                          resolve(isMounted);
+                      } catch (err) {
+                          resolve(false);
+                      }
+                  }, 1000); // Даем время на монтирование
+              });
+
+              if (mountCheck) {
+                  // 7. Обновляем кеш только после успешного монтирования
+                  Cache.mountPoints[cacheKey] = {
+                      path: mountPoint,
+                      remote: remotePath,
+                      options: mountParams.mountOpt
+                  };
+
+                  // 8. Сохраняем состояние
+                  config.enabled = true;
+                  saveMountConfig(bookmark, config, mountName);
+
+                  // 9. Уведомляем об изменениях
+                  UpdateCallbacksRegistry.forEach(callback => callback());
+
+                  console.log('Successfully mounted:', mountPoint);
+                  return true;
+              }
+
+              lastError = new Error('Mount verification failed');
+              retries--;
+          } catch (error) {
+              console.error(`Mount attempt ${3 - retries + 1} failed:`, error);
+              lastError = error;
+              retries--;
+          }
+      }
+
+      throw lastError || new Error('Failed to mount after retries');
+
   } catch (error) {
       console.error('Mount error:', error);
       dialogs.rcloneAPIError(`Failed to mount ${bookmark.$name}: ${error.message}`);
       return false;
   }
 };
-
 const createMountConfig = async function(bookmark, configName) {
   const defaultConfig = {
       enabled: false,
