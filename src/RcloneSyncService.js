@@ -15,6 +15,7 @@ class RcloneSyncService {
         this.activeSyncs = new Map();
         this.healthCheckInterval = 30000;
         this.jobTimeout = 3600000; // 1 hour timeout for jobs
+        this.statusCheckInterval = 1000; // 1 second between status checks
         this._startHealthCheck();
     }
 
@@ -23,10 +24,17 @@ class RcloneSyncService {
         console.log(`[${requestId}] Starting job request to ${endpoint}`, params);
 
         try {
+            // Устанавливаем временный таймаут для создания задачи
+            const originalTimeout = this.apiService.timeout;
+            this.apiService.timeout = timeout || 30000; // 30 секунд на создание задачи
+
             const response = await this.apiService.makeRequest(endpoint, 'POST', {
                 ...params,
                 _async: true
             });
+
+            // Восстанавливаем оригинальный таймаут
+            this.apiService.timeout = originalTimeout;
 
             if (!response || !response.jobid) {
                 throw new Error('Failed to get job ID from response');
@@ -43,29 +51,60 @@ class RcloneSyncService {
     async _waitForJob(jobId, timeout = this.jobTimeout) {
         const startTime = Date.now();
         const requestId = Math.random().toString(36).substring(7);
+        let statusCheckTimer = null;
 
-        while (true) {
-            if (Date.now() - startTime > timeout) {
-                throw new Error(`Job timeout exceeded after ${timeout}ms`);
+        try {
+            return await new Promise((resolve, reject) => {
+                // Таймер для общего таймаута операции
+                const timeoutTimer = setTimeout(() => {
+                    if (statusCheckTimer) {
+                        clearTimeout(statusCheckTimer);
+                    }
+                    reject(new Error(`Job timeout exceeded after ${timeout}ms`));
+                }, timeout);
+
+                const checkStatus = async () => {
+                    try {
+                        // Устанавливаем короткий таймаут для проверки статуса
+                        const originalTimeout = this.apiService.timeout;
+                        this.apiService.timeout = 5000; // 5 секунд на проверку статуса
+
+                        const status = await this.apiService.makeRequest('job/status', 'POST', { jobid: jobId });
+                        
+                        // Восстанавливаем оригинальный таймаут
+                        this.apiService.timeout = originalTimeout;
+
+                        if (status.finished) {
+                            clearTimeout(timeoutTimer);
+                            console.log(`[${requestId}] Job ${jobId} finished:`, status);
+                            if (status.error) {
+                                reject(new Error(status.error));
+                            } else {
+                                resolve(status);
+                            }
+                            return;
+                        }
+
+                        // Планируем следующую проверку
+                        statusCheckTimer = setTimeout(checkStatus, this.statusCheckInterval);
+                    } catch (error) {
+                        if (error.message && error.message.includes('job not found')) {
+                            clearTimeout(timeoutTimer);
+                            console.log(`[${requestId}] Job ${jobId} not found, assuming completed`);
+                            resolve(null);
+                            return;
+                        }
+                        reject(error);
+                    }
+                };
+
+                // Начинаем проверку статуса
+                checkStatus();
+            });
+        } finally {
+            if (statusCheckTimer) {
+                clearTimeout(statusCheckTimer);
             }
-
-            try {
-                const status = await this.apiService.makeRequest('job/status', 'POST', { jobid: jobId });
-                
-                if (status.finished) {
-                    console.log(`[${requestId}] Job ${jobId} finished:`, status);
-                    if (status.error) throw new Error(status.error);
-                    return status;
-                }
-            } catch (error) {
-                if (error.message && error.message.includes('job not found')) {
-                    console.log(`[${requestId}] Job ${jobId} not found, assuming completed`);
-                    return null;
-                }
-                throw error;
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
         }
     }
 
@@ -97,7 +136,7 @@ class RcloneSyncService {
             const jobId = await this._makeJobRequest('core/command', {
                 command: 'bisync',
                 arg: baseArgs
-            });
+            }, 30000); // 30 секунд на запуск bisync
 
             return jobId;
         } catch (error) {
