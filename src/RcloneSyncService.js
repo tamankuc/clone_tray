@@ -119,17 +119,22 @@ class RcloneSyncService {
             '--create-empty-src-dirs',
             '--resilient',
             '--ignore-case',
-            '--conflict-resolve', 'newer',
-            '--compare', 'modtime,size',
+            '--conflict-resolve', 'newer',  // При конфликте берем более новый файл
+            '--compare', 'modtime,size',    // Сравниваем по времени модификации и размеру
             '--modify-window', '2s',
             '--timeout', '30s',
             '--transfers', '1',
             '--ignore-listing-checksum',
+            '--no-cleanup',                 // Не удаляем временные файлы
             '-v'
         ];
 
+        // При первом запуске используем --resync для полной синхронизации
         if (useResync) {
-            baseArgs.push('--resync', '--resync-mode', 'newer');
+            baseArgs.push(
+                '--resync',
+                '--resync-mode', 'newer',   // При ресинхронизации берем более новые файлы
+            );
         }
 
         try {
@@ -151,7 +156,7 @@ class RcloneSyncService {
 
         try {
             const jobId = await this._makeJobRequest('core/command', {
-                command: 'sync',
+                command: 'copy',  // Используем copy вместо sync чтобы избежать удаления
                 arg: [
                     remotePath,
                     localPath,
@@ -159,10 +164,12 @@ class RcloneSyncService {
                     '--inplace',
                     '--verbose',
                     '--track-renames',
-                    '--ignore-existing',
+                    '--ignore-existing',    // Пропускаем существующие файлы
                     '--modify-window', '2s',
                     '--timeout', '30s',
-                    '--transfers', '1'
+                    '--transfers', '1',
+                    '--check-access',       // Проверяем доступ перед копированием
+                    '-v'
                 ]
             });
 
