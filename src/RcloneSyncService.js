@@ -1,3 +1,4 @@
+const { dialog } = require('electron');
 const fs = require('fs');
 
 class RcloneSyncService {
@@ -207,6 +208,8 @@ class RcloneSyncService {
 
                 if (!status.finished) {
                     console.log(`[${requestId}] Sync already active:`, syncKey);
+                    dialogs.notification(`Sync already active for ${bookmark.$name}`);
+
                     return false;
                 }
             } catch (error) {
@@ -230,9 +233,12 @@ class RcloneSyncService {
                 await this._waitForJob(jobId);
                 await this._saveInitializationStatus(bookmark, config);
                 jobId = await this._runBisync(remotePath, localPath, false);
+                dialogs.notification(`Successfully initialized sync for ${bookmark.$name}`);
             } else {
                 console.log(`[${requestId}] Directory already initialized, starting bisync`);
                 jobId = await this._runBisync(remotePath, localPath, false);
+                dialogs.notification(`Started sync for ${bookmark.$name}`);
+
             }
 
             this.activeSyncs.set(syncKey, {
@@ -245,6 +251,7 @@ class RcloneSyncService {
             return true;
         } catch (error) {
             console.error(`[${requestId}] Sync start failed:`, error);
+            dialogs.notification(`Failed to start sync for ${bookmark.$name}: ${error.message}`);
             throw error;
         }
     }

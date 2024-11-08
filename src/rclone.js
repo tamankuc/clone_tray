@@ -111,6 +111,73 @@ const Cache = {
 
 const UpdateCallbacksRegistry = []
 
+let configWatcher = null;
+
+/**
+ * Настроить отслеживание изменений конфиг файла
+ * @private
+ */
+const setupConfigWatcher = function() {
+    if (configWatcher) {
+        configWatcher.close();
+    }
+
+    try {
+        let debounceTimer = null;
+        const debounceDelay = 1000; // Задержка для избежания множественных обновлений
+
+        configWatcher = fs.watch(Cache.configFile, async (eventType, filename) => {
+            if (eventType === 'change') {
+                // Используем debounce чтобы не обрабатывать множественные события
+                if (debounceTimer) {
+                    clearTimeout(debounceTimer);
+                }
+
+                debounceTimer = setTimeout(async () => {
+                    try {
+                        console.log('Config file changed, updating caches...');
+                        
+                        // Обновляем кеши
+                        await updateBookmarksCache();
+                        if (Cache.apiService) {
+                            await updateMountPointsCache();
+                        }
+
+                        // Уведомляем пользователя
+                        const dialogs = require('./dialogs');
+                        dialogs.notification('Rclone config file has been updated');
+
+                        // Обновляем меню
+                        UpdateCallbacksRegistry.forEach(callback => callback());
+
+                    } catch (error) {
+                        console.error('Error updating after config change:', error);
+                        const dialogs = require('./dialogs');
+                        dialogs.notification('Failed to update after config change: ' + error.message);
+                    }
+                }, debounceDelay);
+            }
+        });
+
+        console.log('Config watcher setup for:', Cache.configFile);
+    } catch (error) {
+        console.error('Failed to setup config watcher:', error);
+    }
+};
+
+/**
+ * Очистить отслеживание конфиг файла
+ * @private
+ */
+const cleanupConfigWatcher = function() {
+    if (configWatcher) {
+        configWatcher.close();
+        configWatcher = null;
+    }
+};
+
+
+
 // Helper functions
 const getRcloneBinary = function() {
   return settings.get('rclone_use_bundled') ? RcloneBinaryBundled : RcloneBinaryName
@@ -431,7 +498,7 @@ const startRcloneAPI = async function() {
 
 
           console.log('Запуск Rclone API с командой:', rcloneBinary, command.join(' '));
-
+          dialogs.notification('Запуск Rclone API')
           const apiProcess = spawn(rcloneBinary, command, {
               stdio: ['ignore', 'pipe', 'pipe'],
               detached: false
@@ -592,13 +659,14 @@ const init = async function() {
       console.log('Rclone API server started successfully')
       // Создаем API сервис
       apiService = new RcloneApiService(settings.get('rclone_api_port'), 'user', 'pass')
-      
+      setupConfigWatcher();
+
       // Создаем Sync сервис с зависимостями
-syncService = new RcloneSyncService(
-    apiService,
-    getSyncConfig,  // Функция получения конфига
-    saveSyncConfig  // Функция сохранения конфига
-);
+    syncService = new RcloneSyncService(
+        apiService,
+        getSyncConfig,  // Функция получения конфига
+        saveSyncConfig  // Функция сохранения конфига
+    );
       
       // Сохраняем в кеш
       Cache.apiService = apiService
@@ -633,6 +701,7 @@ syncService = new RcloneSyncService(
 }
 
 const prepareQuit = async function() {
+  cleanupConfigWatcher();
   if (syncService) {
       await syncService.cleanup();
   }
@@ -820,6 +889,8 @@ const unmount = async function(bookmark, mountName = 'default') {
 
       const mountPoint = Cache.mountPoints[cacheKey].path;
       console.log('Unmounting', mountPoint);
+      dialogs.notification(`Successfully unmounted ${bookmark.$name}${mountName !== 'default' ? ` (${mountName})` : ''}`);
+
 
       await Cache.apiService.unmount(mountPoint);
       
@@ -836,7 +907,8 @@ const unmount = async function(bookmark, mountName = 'default') {
       return true;
   } catch (error) {
       console.error('Unmount error:', error);
-      dialogs.rcloneAPIError(`Failed to unmount ${bookmark.$name}: ${error.message}`);
+      // dialogs.rcloneAPIError(`Failed to unmount ${bookmark.$name}: ${error.message}`);
+      dialogs.notification(`Failed to unmount ${bookmark.$name}: ${error.message}`);
       return false;
   }
 };
