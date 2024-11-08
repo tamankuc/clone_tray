@@ -8,100 +8,128 @@ class RcloneApiService {
             'Content-Type': 'application/json',
             'Authorization': `Basic ${this.auth}`,
             'Origin': 'http://localhost',
-            'Connection': 'close'  // Важно: не держим соединение открытым
+            'Connection': 'keep-alive'  // Изменено на keep-alive
         };
-        this.timeout = 10000;
+        this.timeout = 30000; // Увеличен базовый таймаут до 30 секунд
+        this.maxRetries = 3;  // Максимальное количество повторных попыток
+        this.retryDelay = 1000; // Задержка между попытками в мс
     }
 
     async makeRequest(endpoint, method = 'POST', data = null) {
         const requestId = Math.random().toString(36).substring(7);
-        let timeoutId = null;
+        let attempt = 0;
+        let lastError = null;
 
-        try {
-            console.log(`[${requestId}] Starting request to ${endpoint}`);
-            const url = `${this.baseURL}/${endpoint}`;
+        while (attempt < this.maxRetries) {
+            let timeoutId = null;
             
-            const bodyData = data || {};
-            const bodyStr = JSON.stringify(bodyData);
-            
-            const options = {
-                method,
-                headers: {
-                    ...this.headers,
-                    'Content-Length': Buffer.byteLength(bodyStr)
-                },
-                body: bodyStr,
-                timeout: this.timeout,
-                compress: false,     // Отключаем сжатие
-                follow: 0,           // Отключаем редиректы
-                size: 0,             // Отключаем лимит размера ответа
-            };
+            try {
+                console.log(`[${requestId}] Request attempt ${attempt + 1} to ${endpoint}`);
+                const url = `${this.baseURL}/${endpoint}`;
+                
+                const bodyData = data || {};
+                const bodyStr = JSON.stringify(bodyData);
+                
+                const options = {
+                    method,
+                    headers: {
+                        ...this.headers,
+                        'Content-Length': Buffer.byteLength(bodyStr)
+                    },
+                    body: bodyStr,
+                    timeout: this.timeout,
+                    compress: false,     // Отключаем сжатие
+                    follow: 0,           // Отключаем редиректы
+                    size: 0,             // Отключаем лимит размера ответа
+                    keepalive: true      // Включаем keepalive
+                };
 
-            console.log(`[${requestId}] Request details:`, {
-                url,
-                method,
-                headers: options.headers,
-                bodyLength: Buffer.byteLength(bodyStr)
-            });
+                console.log(`[${requestId}] Request details:`, {
+                    url,
+                    method,
+                    headers: options.headers,
+                    bodyLength: Buffer.byteLength(bodyStr),
+                    attempt: attempt + 1
+                });
 
-            // Создаем промис с таймаутом
-            const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => {
-                    reject(new Error(`Request timeout after ${this.timeout}ms`));
-                }, this.timeout);
-            });
+                // Создаем промис с таймаутом
+                const timeoutPromise = new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => {
+                        reject(new Error(`Request timeout after ${this.timeout}ms`));
+                    }, this.timeout);
+                });
 
-            // Race между запросом и таймаутом
-            const response = await Promise.race([
-                fetch(url, options),
-                timeoutPromise
-            ]);
-            
-            // Сразу очищаем таймер
-            if (timeoutId) {
-                clearTimeout(timeoutId);
-                timeoutId = null;
-            }
+                // Race между запросом и таймаутом
+                const response = await Promise.race([
+                    fetch(url, options),
+                    timeoutPromise
+                ]);
 
-            console.log(`[${requestId}] Response:`, {
-                status: response.status,
-                statusText: response.statusText
-            });
+                // Сразу очищаем таймер
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
 
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`HTTP error ${response.status}: ${errorText}`);
-            }
+                console.log(`[${requestId}] Response:`, {
+                    status: response.status,
+                    statusText: response.statusText
+                });
 
-            // Еще один таймаут для чтения тела ответа
-            const responsePromise = response.json();
-            const responseTimeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => {
-                    reject(new Error('Response parsing timeout'));
-                }, 5000); // 5 секунд на парсинг ответа
-            });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP error ${response.status}: ${errorText}`);
+                }
 
-            const responseData = await Promise.race([
-                responsePromise,
-                responseTimeoutPromise
-            ]);
+                // Еще один таймаут для чтения тела ответа
+                const responsePromise = response.json();
+                const responseTimeoutPromise = new Promise((_, reject) => {
+                    timeoutId = setTimeout(() => {
+                        reject(new Error('Response parsing timeout'));
+                    }, 10000); // 10 секунд на парсинг ответа
+                });
 
-            return responseData;
+                const responseData = await Promise.race([
+                    responsePromise,
+                    responseTimeoutPromise
+                ]);
 
-        } catch (error) {
-            console.error(`[${requestId}] Request failed:`, {
-                endpoint,
-                message: error.message,
-                code: error.code,
-                stack: error.stack
-            });
-            throw error;
-        } finally {
-            // На всякий случай очищаем таймер
-            if (timeoutId) {
-                clearTimeout(timeoutId);
+                // Успешный ответ - возвращаем результат
+                return responseData;
+
+            } catch (error) {
+                console.error(`[${requestId}] Request attempt ${attempt + 1} failed:`, {
+                    endpoint,
+                    message: error.message,
+                    code: error.code,
+                });
+
+                lastError = error;
+
+                // Проверяем тип ошибки
+                if (error.code === 'ECONNRESET' || error.message.includes('socket hang up')) {
+                    // Увеличиваем счетчик попыток
+                    attempt++;
+                    
+                    if (attempt < this.maxRetries) {
+                        // Ждем перед следующей попыткой
+                        console.log(`[${requestId}] Waiting ${this.retryDelay}ms before retry...`);
+                        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+                        continue;
+                    }
+                } else {
+                    // Для других ошибок сразу выбрасываем исключение
+                    throw error;
+                }
+            } finally {
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                }
             }
         }
+
+        // Если все попытки исчерпаны, выбрасываем последнюю ошибку
+        throw lastError;
     }
 
     async checkConnection() {
