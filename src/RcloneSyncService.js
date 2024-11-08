@@ -1,5 +1,7 @@
 const { dialog } = require('electron');
 const fs = require('fs');
+const dialogs = require('./dialogs')
+
 
 class RcloneSyncService {
     constructor(apiService, getSyncConfig, saveSyncConfig) {
