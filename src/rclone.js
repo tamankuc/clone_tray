@@ -12,7 +12,7 @@ const dialogs = require('./dialogs')
 const fetch = require('node-fetch')
 const RcloneApiService = require('./RcloneApiService');
 const RcloneSyncService = require('./RcloneSyncService')
-
+const logger = require('./LoggingService');
 let apiService = null
 let syncService = null
 
@@ -29,8 +29,6 @@ const BucketRequiredProviders = [
   'gsc',
   'hubic'
 ]
-
-
 
 /**
  * API URLs for Rclone operations
@@ -135,7 +133,7 @@ const setupConfigWatcher = function() {
 
                 debounceTimer = setTimeout(async () => {
                     try {
-                        console.log('Config file changed, updating caches...');
+                        logger.info('Config file changed, updating caches...');
                         
                         // Обновляем кеши
                         await updateBookmarksCache();
@@ -151,7 +149,7 @@ const setupConfigWatcher = function() {
                         UpdateCallbacksRegistry.forEach(callback => callback());
 
                     } catch (error) {
-                        console.error('Error updating after config change:', error);
+                        logger.error('Error updating after config change:', error);
                         const dialogs = require('./dialogs');
                         dialogs.notification('Failed to update after config change: ' + error.message);
                     }
@@ -159,9 +157,9 @@ const setupConfigWatcher = function() {
             }
         });
 
-        console.log('Config watcher setup for:', Cache.configFile);
+        logger.info('Config watcher setup for:', Cache.configFile);
     } catch (error) {
-        console.error('Failed to setup config watcher:', error);
+        logger.error('Failed to setup config watcher:', error);
     }
 };
 
@@ -173,10 +171,9 @@ const cleanupConfigWatcher = function() {
     if (configWatcher) {
         configWatcher.close();
         configWatcher = null;
+        logger.info('Config watcher cleaned up');
     }
 };
-
-
 
 // Helper functions
 const getRcloneBinary = function() {
@@ -194,20 +191,20 @@ const getRcloneBinary = function() {
 const makeRcloneRequest = async function(method, endpoint, params = null) {
   try {
       if (!Cache.apiService) {
-          console.log('API не инициализирован, возврат к CLI');
+          logger.info('API not initialized, falling back to CLI');
           return await executeCliCommand(endpoint, params);
       }
 
       return await Cache.apiService.makeRequest(endpoint, method, params);
   } catch (error) {
-      console.error('Ошибка API запроса:', error);
-      console.error('Возврат к CLI режиму');
+      logger.error('API request error:', error);
+      logger.info('Falling back to CLI mode');
       return await executeCliCommand(endpoint, params);
   }
 };
 
 const executeCliCommand = async function(endpoint, params) {
-  console.log('Falling back to CLI command for endpoint:', endpoint)
+  logger.info('Executing CLI command for endpoint:', endpoint)
   const rcloneBinary = getRcloneBinary()
 
   try {
@@ -243,11 +240,11 @@ const executeCliCommand = async function(endpoint, params) {
       }
 
       default:
-        console.error(`Unsupported CLI fallback for endpoint: ${endpoint}`)
+        logger.error(`Unsupported CLI fallback for endpoint: ${endpoint}`)
         throw new Error(`Unsupported CLI fallback for endpoint: ${endpoint}`)
     }
   } catch (error) {
-    console.error('CLI execution failed:', error)
+    logger.error('CLI execution failed:', error)
     throw error
   }
 }
@@ -342,10 +339,6 @@ const getMountOptionSets = function(bookmark) {
    return optionSets;
 };
 
-
-
-
-
 /**
 * Сохранить настройки монтирования в конфиг
 * @private
@@ -378,10 +371,8 @@ const saveMountConfig = function(bookmark, config, mountName = 'default') {
   });
 
   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig));
+  logger.info(`Mount config saved for ${bookmark.$name} (${mountName})`);
 };
-
-
-
 
 /**
 * Получить опции монтирования
@@ -396,20 +387,6 @@ const getMountOptions = function(bookmark) {
 };
 
 /**
-* Монтировать удаленную папку
-* @param {object} bookmark Закладка для монтирования
-* @returns {Promise<boolean>}
-*/
-
-
-/**
-* Размонтировать удаленную папку
-* @param {object} bookmark Закладка для размонтирования
-* @returns {Promise<boolean>}
-*/
-
-
-/**
 * Восстановить состояния монтирования
 */
 const restoreMountStates = async function() {
@@ -420,21 +397,21 @@ const restoreMountStates = async function() {
           const config = getMountConfig(bookmark);
           
           if (config.enabled) {
-              console.log('Auto-mounting', bookmarkName);
+              logger.info('Auto-mounting', bookmarkName);
               await mount(bookmark);
           }
       }
   } catch (error) {
-      console.error('Failed to restore mount states:', error);
+      logger.error('Failed to restore mount states:', error);
   }
 };
-
 
 const stopRcloneAPI = async function() {
   if (Cache.apiProcess) {
     Cache.apiProcess.kill()
     Cache.apiProcess = null
     Cache.apiEndpoint = null
+    logger.info('Rclone API stopped');
   }
 }
 
@@ -451,7 +428,7 @@ const executeRcloneCommand = async function(command, options = {}) {
 
     return response
   } catch (error) {
-    console.error('Failed to execute rclone command:', error)
+    logger.error('Failed to execute rclone command:', error)
     throw error
   }
 }
@@ -460,7 +437,7 @@ const startRcloneAPI = async function() {
   return new Promise((resolve, reject) => {
       try {
           if (!settings.get('rclone_api_enable')) {
-              console.log('Rclone API отключен в настройках, используется режим CLI');
+              logger.info('Rclone API disabled in settings, using CLI mode');
               resolve(false);
               return;
           }
@@ -472,7 +449,7 @@ const startRcloneAPI = async function() {
           try {
               execSync(`${rcloneBinary} version`);
           } catch (error) {
-              console.error('Н найден бинарный файл rclone:', error);
+              logger.error('Rclone binary not found:', error);
               resolve(false);
               return;
           }
@@ -493,12 +470,11 @@ const startRcloneAPI = async function() {
               '--rc-allow-origin=*',
               '--no-check-certificate',
               '--log-level=DEBUG',
-              '--log-file=' + path.join('./rclone.log'),
+              '--log-file=' + settings.get('rclone_log_path'),
           ];
 
-
-          console.log('Запуск Rclone API с командой:', rcloneBinary, command.join(' '));
-          dialogs.notification('Запуск Rclone API')
+          logger.info('Starting Rclone API with command:', rcloneBinary, command.join(' '));
+          dialogs.notification('Starting Rclone API')
           const apiProcess = spawn(rcloneBinary, command, {
               stdio: ['ignore', 'pipe', 'pipe'],
               detached: false
@@ -513,7 +489,7 @@ const startRcloneAPI = async function() {
               try {
                   return await apiService.checkConnection();
               } catch (error) {
-                  console.log('API check failed:', error.message);
+                  logger.debug('API check failed:', error.message);
                   return false;
               }
           };
@@ -525,29 +501,29 @@ const startRcloneAPI = async function() {
                       Cache.apiProcess = apiProcess;
                       Cache.apiEndpoint = `http://127.0.0.1:${port}`;
                       Cache.apiService = apiService;
-                      console.log('API отвечает по адресу:', Cache.apiEndpoint);
+                      logger.info('API responding at:', Cache.apiEndpoint);
                       if (checkInterval) clearInterval(checkInterval);
                       if (startupTimeout) clearTimeout(startupTimeout);
                       resolve(true);
                   }
               } catch (error) {
-                  console.error('Ошибка при проверке API:', error);
+                  logger.error('Error checking API:', error);
               }
           };
 
           // Обработчики событий процесса
           apiProcess.stdout.on('data', (data) => {
               const message = data.toString().trim();
-              console.log('Rclone API:', message);
+              logger.info('Rclone API:', message);
           });
 
           apiProcess.stderr.on('data', (data) => {
               const message = data.toString().trim();
-              console.error('Ошибка Rclone API:', message);
+              logger.error('Rclone API Error:', message);
           });
 
           apiProcess.on('close', (code) => {
-              console.log(`Процесс Rclone API завершился с кодом ${code}`);
+              logger.info(`Rclone API process exited with code ${code}`);
               if (!isStarted) {
                   if (checkInterval) clearInterval(checkInterval);
                   if (startupTimeout) clearTimeout(startupTimeout);
@@ -561,13 +537,13 @@ const startRcloneAPI = async function() {
               
               startupTimeout = setTimeout(() => {
                   if (!isStarted) {
-                      console.error('Превышено время запука Rclone API');
+                      logger.error('Rclone API startup timeout exceeded');
                       if (checkInterval) clearInterval(checkInterval);
                       if (apiProcess.pid) {
                           try {
                               process.kill(apiProcess.pid);
                           } catch (err) {
-                              console.error('Ошибка при завершении процесса:', err);
+                              logger.error('Error killing process:', err);
                           }
                       }
                       resolve(false);
@@ -576,12 +552,11 @@ const startRcloneAPI = async function() {
           }, 2000);
 
       } catch (error) {
-          console.error('Не удалось запустить Rclone API:', error);
+          logger.error('Failed to start Rclone API:', error);
           resolve(false);
       }
   });
 };
-
 
 /**
  * Update providers cache using correct API URL
@@ -602,14 +577,13 @@ const updateProvidersCache = async function() {
       }
     })
     
-    if (isDev) {
-      // console.log('Updated providers cache:', Cache.providers)
-    }
+    logger.debug('Updated providers cache:', Cache.providers);
   } catch (error) {
-    console.error('Failed to update providers cache:', error)
+    logger.error('Failed to update providers cache:', error)
     throw new Error('Failed to get rclone providers')
   }
 }
+
 /**
  * Update bookmarks cache using correct API URL 
  * @private
@@ -632,11 +606,9 @@ const updateBookmarksCache = async function() {
           Cache.bookmarks[name] = bookmark;
       });
 
-      if (isDev) {
-          // console.log('Updated bookmarks cache:', Cache.bookmarks);
-      }
+      logger.debug('Updated bookmarks cache:', Cache.bookmarks);
   } catch (error) {
-      console.error('Failed to update bookmarks cache:', error);
+      logger.error('Failed to update bookmarks cache:', error);
       throw new Error('Failed to get rclone config');
   }
 }
@@ -652,38 +624,40 @@ const init = async function() {
       process.env.PATH += ':' + path.join('/', 'usr', 'local', 'bin')
     }
 
+    logger.info('Initializing Rclone...');
+
     // Try to start API server
     const apiStarted = await startRcloneAPI()
     
     if (apiStarted) {
-      console.log('Rclone API server started successfully')
+      logger.info('Rclone API server started successfully')
       // Создаем API сервис
       apiService = new RcloneApiService(settings.get('rclone_api_port'), 'user', 'pass')
       setupConfigWatcher();
 
       // Создаем Sync сервис с зависимостями
-    syncService = new RcloneSyncService(
-        apiService,
-        getSyncConfig,  // Функция получения конфига
-        saveSyncConfig  // Функция сохранения конфига
-    );
+      syncService = new RcloneSyncService(
+          apiService,
+          getSyncConfig,  // Функция получения конфига
+          saveSyncConfig  // Функция сохранения конфига
+      );
       
       // Сохраняем в кеш
       Cache.apiService = apiService
       Cache.syncService = syncService
   } else {
-      console.log('Running in CLI mode')
+      logger.info('Running in CLI mode')
     }
 
     // Get version
     const versionResponse = await makeRcloneRequest('POST', 'core/version')
     Cache.version = versionResponse.version
-    console.log('Rclone version:', Cache.version)
+    logger.info('Rclone version:', Cache.version)
 
     // Set config file path
     Cache.configFile = settings.get('rclone_config') || path.join(app.getPath('userData'), 'rclone.conf')
     Cache.configFile = settings.get('rclone_config')
-    console.log('Using config file:', Cache.configFile)
+    logger.info('Using config file:', Cache.configFile)
 
     // Initialize caches
     await updateProvidersCache();
@@ -692,25 +666,28 @@ const init = async function() {
         await updateMountPointsCache();
     }
 
-    console.log('Rclone initialized successfully');
+    logger.info('Rclone initialized successfully');
     
 } catch (error) {
-    console.error('Failed to initialize rclone:', error);
+    logger.error('Failed to initialize rclone:', error);
     throw error;
 }
 }
 
 const prepareQuit = async function() {
+  logger.info('Preparing to quit...');
   cleanupConfigWatcher();
   if (syncService) {
       await syncService.cleanup();
   }
-  await stopRcloneAPI()
+  await stopRcloneAPI();
+  logger.info('Cleanup completed');
 }
 
 // Provider functions
 const getProvider = function(type) {
   if (!(type in Cache.providers)) {
+    logger.error(`Provider ${type} not found`);
     throw new Error(`Provider ${type} not found`)
   }
   return Cache.providers[type]
@@ -723,6 +700,7 @@ const getProviders = function() {
 // Bookmark functions
 const getBookmark = function(id) {
   if (!(id in Cache.bookmarks)) {
+    logger.error(`Bookmark ${id} not found`);
     throw new Error(`Bookmark ${id} not found`)
   }
   return Cache.bookmarks[id]
@@ -740,13 +718,13 @@ const addBookmark = function(name, config) {
   rcloneConfig[name] = config
   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig))
   
+  logger.info(`Bookmark ${name} added`);
   UpdateCallbacksRegistry.forEach(callback => callback())
 }
 
-
-
 const updateBookmark = function(name, config) {
   if (!(name in Cache.bookmarks)) {
+    logger.error(`Bookmark ${name} not found`);
     throw new Error(`Bookmark ${name} not found`)
   }
   
@@ -757,11 +735,13 @@ const updateBookmark = function(name, config) {
   rcloneConfig[name] = config
   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig))
   
+  logger.info(`Bookmark ${name} updated`);
   UpdateCallbacksRegistry.forEach(callback => callback())
 }
 
 const deleteBookmark = function(name) {
   if (!(name in Cache.bookmarks)) {
+    logger.error(`Bookmark ${name} not found`);
     throw new Error(`Bookmark ${name} not found`)
   }
   
@@ -771,6 +751,7 @@ const deleteBookmark = function(name) {
   delete rcloneConfig[name]
   fs.writeFileSync(Cache.configFile, ini.stringify(rcloneConfig))
   
+  logger.info(`Bookmark ${name} deleted`);
   UpdateCallbacksRegistry.forEach(callback => callback())
 }
 
@@ -788,7 +769,6 @@ const onUpdate = function(callback) {
 const getMountCacheKey = function(bookmarkName, mountName = 'default') {
   return `${bookmarkName}@@${mountName}`;
 };
-
 
 /**
  * Получить путь монтирования
@@ -810,7 +790,6 @@ const getMountPath = function(bookmark, mountName = 'default') {
       path.join(mountDir, `${bookmark.$name}@@${mountName}`);
 };
 
-
 /**
 * Получить статус монтирования
 */
@@ -821,13 +800,6 @@ const getMountStatus = function(bookmark, mountName = 'default') {
   }
   return false;
 };
-
-
-/**
-* Монтировать удаленную папку
-* @param {object} bookmark Закладка для монтирования
-* @returns {Promise<boolean>}
-*/
 
 /**
  * Обновление кеша точек монтирования
@@ -866,14 +838,11 @@ const updateMountPointsCache = async function() {
           });
       }
       
-      if (isDev) {
-          console.log('Updated mount points cache:', Cache.mountPoints);
-      }
+      logger.debug('Updated mount points cache:', Cache.mountPoints);
   } catch (error) {
-      console.error('Failed to update mount points cache:', error);
+      logger.error('Failed to update mount points cache:', error);
   }
 };
-
 
 /**
 * Отмонтировать удаленную папку
@@ -883,14 +852,13 @@ const unmount = async function(bookmark, mountName = 'default') {
       const cacheKey = getMountCacheKey(bookmark.$name, mountName);
       
       if (!Cache.mountPoints[cacheKey]) {
-          console.log('Not mounted:', bookmark.$name, mountName);
+          logger.info('Not mounted:', bookmark.$name, mountName);
           return true;
       }
 
       const mountPoint = Cache.mountPoints[cacheKey].path;
-      console.log('Unmounting', mountPoint);
+      logger.info('Unmounting', mountPoint);
       dialogs.notification(`Successfully unmounted ${bookmark.$name}${mountName !== 'default' ? ` (${mountName})` : ''}`);
-
 
       await Cache.apiService.unmount(mountPoint);
       
@@ -906,13 +874,11 @@ const unmount = async function(bookmark, mountName = 'default') {
 
       return true;
   } catch (error) {
-      console.error('Unmount error:', error);
-      // dialogs.rcloneAPIError(`Failed to unmount ${bookmark.$name}: ${error.message}`);
+      logger.error('Unmount error:', error);
       dialogs.notification(`Failed to unmount ${bookmark.$name}: ${error.message}`);
       return false;
   }
 };
-
 
 /**
 * Открыть точку монтирования в файловом менеджере
@@ -922,6 +888,7 @@ const openMountPoint = async function(bookmark) {
   const mountPoint = getMountStatus(bookmark);
   if (mountPoint) {
       await shell.openPath(mountPoint);
+      logger.info(`Opened mount point for ${bookmark.$name}`);
       return true;
   }
   return false;

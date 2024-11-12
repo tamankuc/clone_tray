@@ -22,6 +22,8 @@ const cache = {
   tray_menu_show_type: true,
   rclone_use_bundled: true,
   rclone_config: path.join(app.getPath('home'), '.config', 'rclone', 'rclone.conf'),
+  rclone_log_path: path.join(app.getPath('home'), '.config', 'rclone', 'rclone.log'),
+  log_app_path: path.join(app.getPath('home'), '.config', 'rclone', 'app.log'),
   custom_args: '',
   rclone_api_enable: true,
   rclone_api_port: 5572,

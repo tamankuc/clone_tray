@@ -8,3 +8,4 @@ node_modules
 dist
 bin/*
 rclone/*
+rclone.log
